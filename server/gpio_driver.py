@@ -227,7 +227,9 @@ class GPIODriver:
         vals = [int(bool(v)) for v in state_tuple]
         resp = self._send(f"S {vals[0]} {vals[1]} {vals[2]} {vals[3]}")
         self._fet_states = [bool(v) for v in vals]
-        if resp and not resp.startswith("OK"):
+        if resp is None and not self._mock:
+            log.warning("RP2040 S command timed out — no response; FET state may not match hardware")
+        elif resp and not resp.startswith("OK"):
             log.warning("RP2040 error: %s", resp)
 
     def all_on(self):
@@ -494,7 +496,9 @@ class GPIODriver:
             raise ValueError("program_sequence requires at least one state")
         cmd = "C " + str(len(parts)) + " " + " ".join(parts)
         resp = self._send(cmd)
-        if resp and not resp.startswith("OK"):
+        if resp is None and not self._mock:
+            log.warning("RP2040 C command timed out — no response; sequence may not be programmed on hardware")
+        elif resp and not resp.startswith("OK"):
             log.warning("RP2040 C error: %s", resp)
 
     def program_sequence_live(self, packed_states):
@@ -505,14 +509,18 @@ class GPIODriver:
             raise ValueError("program_sequence_live requires at least one state")
         cmd = "E " + str(len(parts)) + " " + " ".join(parts)
         resp = self._send(cmd)
-        if resp and not resp.startswith("OK"):
+        if resp is None and not self._mock:
+            log.warning("RP2040 E command timed out — no response; sequence may not be programmed on hardware")
+        elif resp and not resp.startswith("OK"):
             log.warning("RP2040 E error: %s", resp)
 
     def all_on_no_halt(self):
         """Set all FETs on without halting the switching timer."""
         resp = self._send("Y 1 1 1 1")
         self._fet_states = [True, True, True, True]
-        if resp and not resp.startswith("OK"):
+        if resp is None and not self._mock:
+            log.warning("RP2040 Y command timed out — no response; FET state may not match hardware")
+        elif resp and not resp.startswith("OK"):
             log.warning("RP2040 Y error: %s", resp)
 
     def set_step_period_us(self, period_us):
@@ -520,7 +528,9 @@ class GPIODriver:
         firmware re-arms the timer preserving its current step index."""
         period_us = max(50, int(period_us))
         resp = self._send(f"F {period_us}")
-        if resp and not resp.startswith("OK"):
+        if resp is None and not self._mock:
+            log.warning("RP2040 F command timed out — no response; period may not be set on hardware")
+        elif resp and not resp.startswith("OK"):
             log.warning("RP2040 F error: %s", resp)
 
     def start_switching(self):
@@ -572,7 +582,9 @@ class GPIODriver:
     def stop_switching(self):
         """Halt switching and set all FETs off."""
         resp = self._send("H")
-        if resp and not resp.startswith("OK"):
+        if resp is None and not self._mock:
+            log.warning("RP2040 H command timed out — no response; FETs may still be switching on hardware")
+        elif resp and not resp.startswith("OK"):
             log.warning("RP2040 H error: %s", resp)
         # Firmware turns everything off; mirror that in our cache.
         self._fet_states = [False, False, False, False]
@@ -580,7 +592,9 @@ class GPIODriver:
     def debug_step_cycle(self):
         """Advance one step in the programmed cycle (for DEBUG stepping)."""
         resp = self._send("K")
-        if resp and not resp.startswith("OK"):
+        if resp is None and not self._mock:
+            log.warning("RP2040 K command timed out — no response; debug step may not have advanced on hardware")
+        elif resp and not resp.startswith("OK"):
             log.warning("RP2040 K error: %s", resp)
 
     def cleanup(self):

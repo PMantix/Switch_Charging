@@ -277,6 +277,19 @@ class SequenceEngine:
         except Exception:
             log.exception("sync_firmware_clock failed; falling back to midpoint anchor")
         anchor_pi_s, _fw_ticks = self._gpio.start_switching()
+        if anchor_pi_s is None and not self._gpio._mock:
+            # start_switching()'s "G" command got no response from the
+            # RP2040 within its 0.5s timeout (_send() already logged that
+            # at the wire level). We still proceed on the Pi side below —
+            # that's the existing, intentional "keeps the engine running"
+            # fallback — but this is the one place that connects it back
+            # to "a mode transition may not actually have taken effect on
+            # the hardware," which was previously invisible.
+            log.warning(
+                "resume(): no confirmation from RP2040 for switching start "
+                "(G timed out) — mode change may not have taken effect on "
+                "hardware; Pi-side timing continues on an estimate"
+            )
         with self._lock:
             self._step_at_resume = 0
             # Fall back to monotonic() if start_switching returned None
@@ -299,6 +312,12 @@ class SequenceEngine:
         self._gpio.program_sequence_live(packed)
         self._gpio.set_step_period_us(period_us)
         anchor_pi_s, _fw_ticks = self._gpio.start_switching()
+        if anchor_pi_s is None and not self._gpio._mock:
+            log.warning(
+                "resume_live(): no confirmation from RP2040 for switching "
+                "start (G timed out) — mode change may not have taken "
+                "effect on hardware; Pi-side timing continues on an estimate"
+            )
         with self._lock:
             self._step_at_resume = 0
             self._resume_time = anchor_pi_s if anchor_pi_s is not None else monotonic()
