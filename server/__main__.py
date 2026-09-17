@@ -249,11 +249,25 @@ def main():
                 engine.set_frequency(saved_state["frequency"])
             if "sequence" in saved_state:
                 engine.set_sequence(saved_state["sequence"])
+            # sensor_rate/ina226_avg/bus_every: NOT firmware-persisted
+            # (in-RAM only on the RP2040 — see command_server.py's
+            # _persist_state() docstring), so these need restoring same
+            # as frequency/sequence. Calibration is NOT restored here —
+            # it's already written to RP2040 flash and survives on its
+            # own (firmware-c/src/ina226.c: cal_persist()).
+            if saved_state.get("ina226_avg") is not None:
+                gpio.set_ina226_avg(saved_state["ina226_avg"])
+            if saved_state.get("bus_every") is not None:
+                gpio.set_bus_every(saved_state["bus_every"])
+            if saved_state.get("sensor_rate") is not None:
+                gpio.set_sensor_rate(saved_state["sensor_rate"])
             af = saved_state.get("auto_follow") or {}
             if af.get("i_enter_a") is not None and af.get("i_exit_a") is not None:
                 mc.set_auto_follow_thresholds(af["i_enter_a"], af["i_exit_a"])
             if af.get("target_mode"):
                 mc.set_auto_follow_target(af["target_mode"])
+            if af.get("cc_setpoint_a") is not None:
+                mc._auto_follow.set_cc_setpoint(af["cc_setpoint_a"])
             if saved_state.get("mode"):
                 mc.set_mode(saved_state["mode"])
             if af.get("enabled"):

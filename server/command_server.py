@@ -66,23 +66,38 @@ class CommandServer:
     # -- state persistence (survive a power cycle) ---------------------------
 
     def _persist_state(self) -> None:
-        """Save mode/frequency/sequence/auto-follow config so a reboot
-        resumes here instead of resetting to IDLE. pulse_mode isn't saved
-        separately — it's a side effect of `mode` (CHARGE vs PULSE_CHARGE)
-        and gets set correctly when `mode` is restored via set_mode()."""
+        """Save every operator-set value that would otherwise reset on a
+        power cycle, so a reboot resumes exactly where it left off.
+
+        pulse_mode isn't saved separately — it's a side effect of `mode`
+        (CHARGE vs PULSE_CHARGE) and gets set correctly when `mode` is
+        restored via set_mode().
+
+        Calibration is deliberately NOT included here — it's already
+        written to the RP2040's own flash (see cal_persist() in
+        firmware-c/src/ina226.c) and survives a power cycle on its own.
+        sensor_rate/ina226_avg/bus_every are NOT firmware-persisted
+        (in-RAM only, e.g. `s_avg` in ina226.c defaults to 4 on every
+        boot), so those do need saving here.
+        """
         from server.state_persistence import save_state
         try:
             engine_state = self._engine.get_state()
             af = self._mc.get_auto_follow_status()
+            profile = self._mc._gpio.get_sensor_profile() or {}
             save_state({
                 "mode": self._mc.get_mode().value,
                 "frequency": engine_state["frequency"],
                 "sequence": engine_state["sequence"],
+                "sensor_rate": self._mc._gpio.get_sensor_rate(),
+                "ina226_avg": profile.get("avg"),
+                "bus_every": profile.get("bus_every"),
                 "auto_follow": {
                     "enabled": af.get("enabled", False),
                     "target_mode": af.get("target_mode", "charge"),
                     "i_enter_a": af.get("i_enter_a"),
                     "i_exit_a": af.get("i_exit_a"),
+                    "cc_setpoint_a": af.get("cc_setpoint_a"),
                 },
             })
         except Exception:
@@ -264,6 +279,7 @@ class CommandServer:
                 self._mc._gpio.set_sensor_rate(rate)
                 # Broadcast to TUI capped at _MAX_SUBSCRIBE_HZ
                 self._broadcast_hz = min(max(rate, _DEFAULT_SUBSCRIBE_HZ), _MAX_SUBSCRIBE_HZ)
+                self._persist_state()
                 return {"ok": True, "sensor_rate": self._mc._gpio.get_sensor_rate()}
 
             elif cmd == "set_ina226_avg":
@@ -273,6 +289,7 @@ class CommandServer:
                 actual, max_hz = self._mc._gpio.set_ina226_avg(int(avg))
                 if actual is None:
                     return {"ok": False, "error": "Failed to set AVG"}
+                self._persist_state()
                 return {"ok": True, "avg": actual, "max_hz": max_hz,
                         "sensor_rate": self._mc._gpio.get_sensor_rate()}
 
@@ -283,6 +300,7 @@ class CommandServer:
                 actual, max_hz = self._mc._gpio.set_bus_every(int(every))
                 if actual is None:
                     return {"ok": False, "error": "Failed to set bus decimation"}
+                self._persist_state()
                 return {"ok": True, "bus_every": actual, "max_hz": max_hz,
                         "sensor_rate": self._mc._gpio.get_sensor_rate()}
 
@@ -460,6 +478,7 @@ class CommandServer:
                 except (KeyError, TypeError, ValueError) as e:
                     return {"ok": False, "error": f"Need numeric cc_setpoint_a: {e}"}
                 self._mc._auto_follow.set_cc_setpoint(amps)
+                self._persist_state()
                 return {"ok": True, "auto_follow": self._mc.get_auto_follow_status()}
 
             # -- schedule monitor (passive PLAN/OBSERVED tracker) ------------
