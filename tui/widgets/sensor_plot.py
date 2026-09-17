@@ -60,6 +60,32 @@ COLOR_BITS = {"green": 1, "cyan": 2, "yellow": 4, "magenta": 8}
 BIT_TO_COLOR = {1: "green", 2: "cyan", 4: "yellow", 8: "magenta"}
 
 
+def _append_run(t: Text, cells) -> None:
+    """Append a row of (char, style) cells, batching consecutive same-style
+    runs into one Text.append() instead of one per character.
+
+    Rich resolves/combines a Style at every span boundary during render, so
+    one append per character (as this used to do) makes that cost scale
+    with cell count instead of with the number of color changes — with
+    plots hundreds to thousands of cells wide, that was the dominant cost
+    in a py-spy profile of the live TUI. Runs of the same color (which is
+    most of any plot — background "dim" cells, or several same-color dots
+    in a row) now cost one span instead of N.
+    """
+    if not cells:
+        return
+    run_chars = [cells[0][0]]
+    run_style = cells[0][1]
+    for ch, style in cells[1:]:
+        if style == run_style:
+            run_chars.append(ch)
+        else:
+            t.append("".join(run_chars), style=run_style)
+            run_chars = [ch]
+            run_style = style
+    t.append("".join(run_chars), style=run_style)
+
+
 class SensorPlot(Widget):
     """Rolling timeseries plots with compact and expanded modes."""
 
@@ -452,8 +478,7 @@ class SensorPlot(Widget):
     def _render_braille_rows(self, t: Text, rows: list, width: int) -> None:
         for row in rows:
             t.append(" \u2502", style="dim")
-            for ch, color in row:
-                t.append(ch, style=color)
+            _append_run(t, row)
             t.append("\u2502\n", style="dim")
         t.append(" \u2514", style="dim")
         t.append("\u2500" * width, style="dim")
@@ -472,8 +497,7 @@ class SensorPlot(Widget):
                 else:
                     t.append("    ", style="dim")
                 t.append("\u2502", style="dim")
-                for ch, c in row_chars:
-                    t.append(ch, style=c)
+                _append_run(t, row_chars)
                 t.append("\u2502\n", style="dim")
         t.append("    \u2514", style="dim")
         t.append("\u2500" * width, style="dim")
@@ -655,14 +679,12 @@ class SensorPlot(Widget):
                 for row_idx in range(ph):
                     t.append("  \u2502", style="dim")
                     if row_idx < len(v_rows):
-                        for ch, c in v_rows[row_idx]:
-                            t.append(ch, style=c)
+                        _append_run(t, v_rows[row_idx])
                     else:
                         t.append(" " * col_w, style="dim")
                     t.append("\u2502 \u2502", style="dim")
                     if row_idx < len(i_rows):
-                        for ch, c in i_rows[row_idx]:
-                            t.append(ch, style=c)
+                        _append_run(t, i_rows[row_idx])
                     else:
                         t.append(" " * col_w, style="dim")
                     t.append("\u2502\n", style="dim")
@@ -692,15 +714,13 @@ class SensorPlot(Widget):
                 # Render braille rows side-by-side
                 for row_idx in range(ph):
                     t.append("  \u2502", style="dim")
-                    for ch, c in v_rows[row_idx]:
-                        t.append(ch, style=c)
+                    _append_run(t, v_rows[row_idx])
                     t.append("\u2502", style="dim")
 
                     t.append(" ", style="dim")
 
                     t.append("\u2502", style="dim")
-                    for ch, c in i_rows[row_idx]:
-                        t.append(ch, style=c)
+                    _append_run(t, i_rows[row_idx])
                     t.append("\u2502\n", style="dim")
 
                 # Bottom border
