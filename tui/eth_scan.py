@@ -22,6 +22,11 @@ PROBE_TIMEOUT = 1.0
 # Update as boards are added/reassigned — see the "Ethernet fleet
 # networking" section of Pi_information.md for how these get set.
 KNOWN_ETH_HOSTS: list[tuple[str, str]] = [
+    ("pi-SW1", "192.168.137.105"),  # reserved — not configured on the Pi yet
+    ("pi-SW2", "192.168.137.106"),  # reserved — not configured on the Pi yet
+    ("pi-SW3", "192.168.137.107"),  # reserved — not configured on the Pi yet
+    ("pi-SW4", "192.168.137.108"),  # reserved — not configured on the Pi yet
+    ("pi-SW5", "192.168.137.109"),  # reserved — not configured on the Pi yet
     ("pi-SW6", "192.168.137.104"),
     ("pi-SW7", "192.168.137.101"),
     ("pi-SW8", "192.168.137.102"),
