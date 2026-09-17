@@ -22,6 +22,7 @@ PROBE_TIMEOUT = 1.0
 # Update as boards are added/reassigned — see the "Ethernet fleet
 # networking" section of Pi_information.md for how these get set.
 KNOWN_ETH_HOSTS: list[tuple[str, str]] = [
+    ("pi-SW6", "192.168.137.104"),
     ("pi-SW7", "192.168.137.101"),
     ("pi-SW8", "192.168.137.102"),
     ("pi-SW9", "192.168.137.103"),

@@ -47,7 +47,7 @@ class PiList(Widget):
         self.entries = tuple(entries)
         if self.selected_index >= len(self.entries):
             self.selected_index = max(0, len(self.entries) - 1)
-        self.refresh()
+        self.refresh(layout=True)
 
     def set_selected(self, index: int) -> None:
         if 0 <= index < len(self.entries):
@@ -61,6 +61,13 @@ class PiList(Widget):
         return self.entries[idx]
 
     # -- rendering -----------------------------------------------------------
+
+    def get_content_height(self, container, viewport, width: int) -> int:
+        """Tell Textual how many lines `render()` actually needs — without
+        this, `height: auto` on a plain Widget with a custom render() has
+        no way to know, and silently collapses to 1 line regardless of
+        how many entries there are."""
+        return max(1, len(self.entries))
 
     def render(self) -> Text:
         if not self.entries:
