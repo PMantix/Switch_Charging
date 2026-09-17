@@ -63,6 +63,31 @@ class CommandServer:
         # TUI broadcast rate, which used to cap everything at 30 Hz.
         self._mc._gpio.on_sensor_tick = self._on_sensor_tick
 
+    # -- state persistence (survive a power cycle) ---------------------------
+
+    def _persist_state(self) -> None:
+        """Save mode/frequency/sequence/auto-follow config so a reboot
+        resumes here instead of resetting to IDLE. pulse_mode isn't saved
+        separately — it's a side effect of `mode` (CHARGE vs PULSE_CHARGE)
+        and gets set correctly when `mode` is restored via set_mode()."""
+        from server.state_persistence import save_state
+        try:
+            engine_state = self._engine.get_state()
+            af = self._mc.get_auto_follow_status()
+            save_state({
+                "mode": self._mc.get_mode().value,
+                "frequency": engine_state["frequency"],
+                "sequence": engine_state["sequence"],
+                "auto_follow": {
+                    "enabled": af.get("enabled", False),
+                    "target_mode": af.get("target_mode", "charge"),
+                    "i_enter_a": af.get("i_enter_a"),
+                    "i_exit_a": af.get("i_exit_a"),
+                },
+            })
+        except Exception:
+            log.exception("Failed to persist state")
+
     # -- lifecycle ----------------------------------------------------------
 
     def start(self):
@@ -196,6 +221,7 @@ class CommandServer:
                 if mode_str is None:
                     return {"ok": False, "error": "Missing 'mode' field"}
                 new_mode = self._mc.set_mode(mode_str)
+                self._persist_state()
                 return {"ok": True, "mode": new_mode.value}
 
             elif cmd == "set_sequence":
@@ -203,6 +229,7 @@ class CommandServer:
                 if seq is None:
                     return {"ok": False, "error": "Missing 'sequence' field"}
                 self._engine.set_sequence(int(seq))
+                self._persist_state()
                 return {"ok": True, "sequence": self._engine.get_sequence()}
 
             elif cmd == "set_frequency":
@@ -210,6 +237,7 @@ class CommandServer:
                 if freq is None:
                     return {"ok": False, "error": "Missing 'frequency' field"}
                 self._engine.set_frequency(float(freq))
+                self._persist_state()
                 return {"ok": True, "frequency": self._engine.get_frequency()}
 
             elif cmd == "set_fet":
@@ -402,6 +430,7 @@ class CommandServer:
             elif cmd == "auto_follow_set_enabled":
                 enabled = bool(msg.get("enabled", False))
                 self._mc.set_auto_follow_enabled(enabled)
+                self._persist_state()
                 return {"ok": True, "auto_follow": self._mc.get_auto_follow_status()}
 
             elif cmd == "auto_follow_set_thresholds":
@@ -414,6 +443,7 @@ class CommandServer:
                     self._mc.set_auto_follow_thresholds(i_enter, i_exit)
                 except ValueError as e:
                     return {"ok": False, "error": str(e)}
+                self._persist_state()
                 return {"ok": True, "auto_follow": self._mc.get_auto_follow_status()}
 
             elif cmd == "auto_follow_set_target":
@@ -421,6 +451,7 @@ class CommandServer:
                 if target not in ("charge", "pulse_charge"):
                     return {"ok": False, "error": "target_mode must be 'charge' or 'pulse_charge'"}
                 self._mc.set_auto_follow_target(target)
+                self._persist_state()
                 return {"ok": True, "auto_follow": self._mc.get_auto_follow_status()}
 
             elif cmd == "auto_follow_set_cc_setpoint":

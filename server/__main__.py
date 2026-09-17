@@ -23,6 +23,7 @@ from server.gpio_driver import GPIODriver
 from server.sequence_engine import SequenceEngine
 from server.mode_controller import ModeController, Mode
 from server.command_server import CommandServer
+from server.state_persistence import load_state
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -231,6 +232,35 @@ def main():
     gpio = GPIODriver()
     engine = SequenceEngine(gpio)
     mc = ModeController(gpio, engine)
+
+    # Restore settings from before the last power cycle, if any (see
+    # server/state_persistence.py — ModeController itself always starts
+    # safe in IDLE with everything off; this deliberately overrides that
+    # once we're ready, per explicit request to fully auto-resume,
+    # including the active mode). Order matters: frequency/sequence and
+    # auto-follow thresholds/target go first, then mode is forced via
+    # set_mode() while auto-follow is still disabled (so it takes the
+    # exact saved mode instead of being routed through auto-follow's
+    # hysteresis), and auto-follow's enabled flag is restored last.
+    saved_state = load_state()
+    if saved_state:
+        try:
+            if "frequency" in saved_state:
+                engine.set_frequency(saved_state["frequency"])
+            if "sequence" in saved_state:
+                engine.set_sequence(saved_state["sequence"])
+            af = saved_state.get("auto_follow") or {}
+            if af.get("i_enter_a") is not None and af.get("i_exit_a") is not None:
+                mc.set_auto_follow_thresholds(af["i_enter_a"], af["i_exit_a"])
+            if af.get("target_mode"):
+                mc.set_auto_follow_target(af["target_mode"])
+            if saved_state.get("mode"):
+                mc.set_mode(saved_state["mode"])
+            if af.get("enabled"):
+                mc.set_auto_follow_enabled(True)
+            log.info("Restored persisted settings: %s", saved_state)
+        except Exception:
+            log.exception("Failed to restore persisted state — starting in IDLE")
 
     # Command server
     cmd_server = CommandServer(mc, engine)
