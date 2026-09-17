@@ -523,7 +523,7 @@ class SwitchingCircuitApp(App):
         Binding("[", "log_duration_down", "Dur-", show=False),
         Binding("]", "log_duration_up", "Dur+", show=False),
         Binding("a", "load_schedule", "Load schedule", show=False),
-        Binding("tab", "toggle_right_panel", "Toggle Panel", show=False),
+        Binding("tab", "toggle_right_panel", "Toggle Panel", show=False, priority=True),
         Binding("A", "ap_mode", "AP Mode", show=False),
         Binding("F", "auto_follow_toggle", "Auto-follow toggle", show=False),
         Binding("T", "auto_follow_cycle_target", "Auto-follow target", show=False),
