@@ -27,6 +27,7 @@ from tui.widgets.fleet_list import FleetList, FleetEntry
 from tui.widgets.left_panel import LeftPanel
 from tui.widgets.calibration_screen import CalibrationScreen
 from tui.widgets.pi_picker import PiPicker
+from tui.widgets.eth_picker import EthPicker
 from tui.widgets.right_panel import RightPanel
 from tui.widgets.sensor_plot import SensorPlot
 from tui.widgets.auto_panel import AutoPanel
@@ -536,6 +537,7 @@ class SwitchingCircuitApp(App):
         Binding("C", "client_mode", "Client Mode", show=False),
         Binding("D", "toggle_probe", "Latency", show=False),
         Binding("P", "switch_pi", "Switch Pi", show=True),
+        Binding("E", "switch_pi_eth", "Switch Pi (Eth)", show=True),
         Binding("O", "offload", "Offload", show=False),
         Binding("B", "calibrate", "Calibrate", show=False),
         Binding("R", "toggle_plot_range", "Range", show=False),
@@ -1712,6 +1714,31 @@ class SwitchingCircuitApp(App):
             return
         self._current_pi_name = ssid.replace("pi_", "") if ssid.startswith("pi_") else ssid
         self._switch_pi(AP_GATEWAY)
+
+    # -- Ethernet Pi picker (swap between statically-addressed Pis on the
+    #    shared switch network — no WiFi join needed, all simultaneously
+    #    reachable) ------------------------------------------------------
+
+    def action_switch_pi_eth(self) -> None:
+        """Open the Ethernet picker to swap the active Pi."""
+        if self._data_logger.is_logging:
+            self.notify(
+                "Stop the active recording (l) before switching Pis.",
+                title="Recording active",
+                severity="warning",
+            )
+            return
+        current_host = self._client.host if self._client else ""
+        self.push_screen(
+            EthPicker(current_host=current_host),
+            self._on_eth_picker_result,
+        )
+
+    def _on_eth_picker_result(self, host: Optional[str]) -> None:
+        if not host:
+            return
+        self._current_pi_name = host
+        self._switch_pi(host)
 
     def _switch_pi(self, new_host: str) -> None:
         """Retarget the existing PiClient at a different Pi.
