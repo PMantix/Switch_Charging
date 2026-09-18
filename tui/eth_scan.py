@@ -9,6 +9,7 @@ is needed to switch between them.
 
 from __future__ import annotations
 
+import re
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -26,11 +27,12 @@ KNOWN_ETH_HOSTS: list[tuple[str, str]] = [
     ("pi-SW2", "192.168.137.106"),  # reserved — not configured on the Pi yet
     ("pi-SW3", "192.168.137.107"),  # reserved — not configured on the Pi yet
     ("pi-SW4", "192.168.137.108"),  # reserved — not configured on the Pi yet
-    ("pi-SW5", "192.168.137.109"),  # reserved — not configured on the Pi yet
+    ("pi-SW5", "192.168.137.109"),
     ("pi-SW6", "192.168.137.104"),
     ("pi-SW7", "192.168.137.101"),
     ("pi-SW8", "192.168.137.102"),
     ("pi-SW9", "192.168.137.103"),
+    ("pi-SW10", "192.168.137.110"),
 ]
 
 
@@ -53,12 +55,20 @@ def _probe(label: str, ip: str) -> EthPi:
         return EthPi(label=label, ip=ip, latency_ms=None, online=False)
 
 
+def _numeric_sort_key(p: EthPi):
+    # Plain string sort puts "pi-SW10" right after "pi-SW1" (before "pi-SW2")
+    # since '1' < '2' character-by-character — sort by the trailing number
+    # instead so the list reads pi-SW1, pi-SW2, ..., pi-SW9, pi-SW10.
+    m = re.search(r"(\d+)$", p.label)
+    return int(m.group(1)) if m else float("inf")
+
+
 def scan_eth_pis() -> list[EthPi]:
-    """Probe all known static Ethernet hosts in parallel, sorted by label."""
+    """Probe all known static Ethernet hosts in parallel, sorted numerically."""
     if not KNOWN_ETH_HOSTS:
         return []
     with ThreadPoolExecutor(max_workers=len(KNOWN_ETH_HOSTS)) as ex:
         futures = [ex.submit(_probe, label, ip) for label, ip in KNOWN_ETH_HOSTS]
         results = [f.result() for f in as_completed(futures)]
-    results.sort(key=lambda p: p.label)
+    results.sort(key=_numeric_sort_key)
     return results
