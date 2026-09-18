@@ -45,3 +45,18 @@ def my_ap_profile() -> str:
     `nmcli connection add ... con-name pi_SW1 ssid pi_SW1`.
     """
     return my_ap_ssid()
+
+
+def my_static_eth_ip() -> str | None:
+    """Static IP for this Pi's `eth0` on the fleet switch subnet
+    (192.168.137.0/24), or None if this board doesn't have one assigned.
+
+    Hardcoded per board, same convention as my_ap_ssid() above — edited
+    directly on each Pi after its IP is assigned, rather than derived
+    (hostname is stuck at "pi-SW5" on every cloned board, so it can't be
+    used to infer this). Consumed by server/eth_static.py, which
+    re-applies this IP to eth0 on every boot: the NetworkManager
+    connection profile carrying the static config has been observed to
+    occasionally reset to a fresh DHCP-default profile between boots.
+    """
+    return None

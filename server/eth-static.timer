@@ -1,0 +1,10 @@
+[Unit]
+Description=Switch Charging V2 - Periodic Ethernet static IP check
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=2min
+Unit=eth-static.service
+
+[Install]
+WantedBy=timers.target

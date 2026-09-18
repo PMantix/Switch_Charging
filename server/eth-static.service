@@ -1,0 +1,15 @@
+[Unit]
+Description=Switch Charging V2 - Ethernet static IP enforcement
+After=NetworkManager.service
+Wants=NetworkManager.service
+Before=switching-circuit.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/pi/Code/Switch_Charging_V2
+ExecStart=/usr/bin/python3 -m server.eth_static
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
