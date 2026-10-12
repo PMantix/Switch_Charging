@@ -424,6 +424,9 @@ class SwitchingCircuitApp(App):
     }
     #main-layout {
         height: 1fr;
+        /* Columns need ~136 cols; on narrower terminals scroll sideways
+           instead of clipping the right panel (shift+wheel / trackpad). */
+        overflow-x: auto;
     }
     #left-col {
         width: 32;
@@ -541,6 +544,13 @@ class SwitchingCircuitApp(App):
         Binding("O", "offload", "Offload", show=False),
         Binding("B", "calibrate", "Calibrate", show=False),
         Binding("R", "toggle_plot_range", "Range", show=False),
+        # Keyboard fallback for scrolling on small screens (wheel also works).
+        Binding("pagedown", "scroll_col('center-col', 1)", "Scroll", show=False),
+        Binding("pageup", "scroll_col('center-col', -1)", "Scroll", show=False),
+        Binding("shift+pagedown", "scroll_col('right-col', 1)", "Scroll R", show=False),
+        Binding("shift+pageup", "scroll_col('right-col', -1)", "Scroll R", show=False),
+        Binding("shift+right", "scroll_layout(1)", "Scroll →", show=False),
+        Binding("shift+left", "scroll_layout(-1)", "Scroll ←", show=False),
     ]
 
     # During startup, limit state updates to let the layout stabilize.
@@ -636,6 +646,11 @@ class SwitchingCircuitApp(App):
                 self._driver, "_disable_mouse_support"
             ):
                 self._driver._disable_mouse_support()
+                # Re-enable button/wheel reporting only (no 1003 any-motion
+                # mode) so the columns can still be scrolled with the wheel
+                # or trackpad on small screens, without the MouseMove flood.
+                self._driver.write("\x1b[?1000h\x1b[?1006h")
+                self._driver.flush()
         except Exception:
             log.exception("failed to disable mouse tracking")
         # retry_delay=2.0, max_retries=30 -> ~60s window to survive a network
@@ -1268,6 +1283,17 @@ class SwitchingCircuitApp(App):
         plot.auto_i_range = not auto
         mode = "Auto" if not auto else "Fixed (2-4.5V, ±500mA)"
         self.notify(f"Plot range: {mode}", title="Range")
+
+    def action_scroll_col(self, col_id: str, direction: int) -> None:
+        col = self.query_one(f"#{col_id}", Vertical)
+        if direction > 0:
+            col.scroll_page_down()
+        else:
+            col.scroll_page_up()
+
+    def action_scroll_layout(self, direction: int) -> None:
+        layout = self.query_one("#main-layout", Horizontal)
+        layout.scroll_relative(x=direction * 20)
 
     # -- Actions: INA226 Sensor Profile --------------------------------------
 
