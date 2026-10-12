@@ -4,7 +4,9 @@ Switching Circuit V2 - GPIO Driver (RP2040 Serial).
 Sends FET state commands to the RP2040-Zero over USB serial.
 Receives streaming sensor data via push from the RP2040.
 Falls back to a mock implementation when pyserial is unavailable
-or the RP2040 is not connected.
+or the RP2040 is not connected. With sim=True (``python -m server
+--sim``) it never touches serial and talks to server/sim_firmware.py
+instead, which answers commands and streams synthetic sensor data.
 """
 
 import json
@@ -36,12 +38,15 @@ class GPIODriver:
     """Controls the four H-bridge MOSFET outputs via RP2040 serial.
     Receives streaming sensor data from the RP2040 push model."""
 
-    def __init__(self, port=RP2040_SERIAL_PORT, baud=RP2040_SERIAL_BAUD):
+    def __init__(self, port=RP2040_SERIAL_PORT, baud=RP2040_SERIAL_BAUD, sim=False):
         self._lock = threading.Lock()  # protects _ser for writes
         self._fet_states = [False, False, False, False]
         self._port_name = port
         self._ser = None
         self._mock = True
+        # Simulated firmware (--sim). None on real hardware and in plain
+        # mock mode; when set, _send() routes every command to it.
+        self._sim = None
 
         # Pi↔firmware clock offset, populated by sync_firmware_clock(). Stored
         # as "firmware_seconds - pi_seconds" so an absolute firmware ticks_us
@@ -95,7 +100,15 @@ class GPIODriver:
         # reject them, so callers must fall back (see live_commands_supported).
         self._live_cmds = None
 
-        if _HAS_SERIAL:
+        if sim:
+            from server.sim_firmware import SimFirmware
+            self._port_name = "SIMULATED"
+            self._sim = SimFirmware(self._handle_stream_line)
+            self._link_up = True
+            self._link_since = time.monotonic()
+            self.probe_live_commands()
+            log.warning("GPIODriver running in SIMULATION mode — no RP2040")
+        elif _HAS_SERIAL:
             if not self._open_port(port):
                 log.warning("No RP2040 found on any serial port — using mock "
                             "driver until one appears (retrying every %.0fs)",
@@ -224,7 +237,7 @@ class GPIODriver:
     def link_status(self):
         """Health of the RP2040 link and sensor stream, for get_status.
 
-        state: "connected" | "disconnected" | "mock" (no pyserial)
+        state: "connected" | "disconnected" | "mock" (no pyserial, or --sim)
         stale: True when the sensor values in the status are not live —
                link down, nothing received yet, or no D line within
                max(SENSOR_STALE_MIN_S, 5 stream periods).
@@ -234,7 +247,7 @@ class GPIODriver:
         age = None if last is None else time.monotonic() - last
         hz = self._sensor_hz
         stale_after = max(SENSOR_STALE_MIN_S, 5.0 / hz) if hz > 0 else SENSOR_STALE_MIN_S
-        if not _HAS_SERIAL:
+        if not _HAS_SERIAL or self._sim is not None:
             state = "mock"
         else:
             state = "connected" if self._link_up else "disconnected"
@@ -377,6 +390,8 @@ class GPIODriver:
     def _send(self, cmd):
         """Send a command and wait for the response."""
         with self._lock:
+            if self._sim is not None:
+                return self._sim.handle(cmd)
             if self._mock or not self._ser:
                 return None
             try:
@@ -628,7 +643,7 @@ class GPIODriver:
         prior midpoint-only anchor couldn't see.
         """
         from time import monotonic
-        if self._mock:
+        if self._mock and self._sim is None:
             return None
         t_send = monotonic()
         resp = self._send("P")
@@ -781,6 +796,8 @@ class GPIODriver:
 
     def cleanup(self):
         self._stop_event.set()
+        if self._sim is not None:
+            self._sim.stop()
         # Stop streaming
         if self._ser and not self._mock:
             try:

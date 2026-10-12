@@ -5,6 +5,10 @@ Two recording tiers:
   - Pi (≤ 10min): Records on Pi SD card at full stream rate, SCPs to Mac when done
   - Mac (> 10min): Records directly on Mac from TUI state stream
 
+In simulation (``python -m tui --sim``) everything records on the Mac
+tier, files are named SIM_*.csv, and every row carries a trailing
+``source=SIMULATION`` column so simulated data can't pass for real.
+
 Mac-tier CSV writes happen on a dedicated daemon thread so the UI
 thread's _apply_state is never blocked by file I/O. Queue is unbounded;
 at 15 Hz × ~120 B per row, a multi-minute disk stall is still only a
@@ -24,6 +28,8 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 DEFAULT_LOG_DIR = Path.home() / "SwitchingCircuitV2_logs"
+SIM_PREFIX = "SIM_"
+SIM_SOURCE = "SIMULATION"
 PI_MAX_SECONDS = 600  # 10 minutes
 _DEPTH_WARN_THRESHOLD = 1000
 _STOP_SENTINEL = object()
@@ -43,8 +49,9 @@ def select_tier(duration_s: float) -> RecordTier:
 
 
 class DataLogger:
-    def __init__(self, log_dir: Path = DEFAULT_LOG_DIR):
+    def __init__(self, log_dir: Path = DEFAULT_LOG_DIR, simulated: bool = False):
         self._log_dir = log_dir
+        self._simulated = simulated
         self._tier: Optional[RecordTier] = None
         self._duration_s: float = self._load_duration()
 
@@ -104,6 +111,11 @@ class DataLogger:
     def tier(self) -> Optional[RecordTier]:
         return self._tier
 
+    def tier_for(self, duration_s: float) -> RecordTier:
+        """Tier a recording of this length would use. Simulation has no
+        Pi to record on, so it is always the Mac tier."""
+        return RecordTier.MAC if self._simulated else select_tier(duration_s)
+
     @property
     def elapsed(self) -> float:
         if self._start_time:
@@ -117,7 +129,7 @@ class DataLogger:
             self.stop()
 
         self._client = client
-        self._tier = select_tier(self._duration_s)
+        self._tier = self.tier_for(self._duration_s)
         self._start_time = datetime.now()
         self._sample_count = 0
         total_samples = int(self._duration_s * sensor_hz)
@@ -159,7 +171,8 @@ class DataLogger:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         freq_str = f"{freq:.1f}Hz".replace(".", "p")
         sensor_str = f"{sensor_hz:.0f}sps"
-        self._path = self._log_dir / f"{mode}_seq{seq+1}_{freq_str}_{sensor_str}_{ts}.csv"
+        prefix = SIM_PREFIX if self._simulated else ""
+        self._path = self._log_dir / f"{prefix}{mode}_seq{seq+1}_{freq_str}_{sensor_str}_{ts}.csv"
         self._max_samples = count
         self._warned_backpressure = False
         self._queue = queue.Queue()
@@ -202,6 +215,8 @@ class DataLogger:
             f"{_sv('N1', 'voltage'):.6f}", f"{_sv('N1', 'current'):.8f}",
             f"{_sv('N2', 'voltage'):.6f}", f"{_sv('N2', 'current'):.8f}",
         ]
+        if self._simulated:
+            row.append(SIM_SOURCE)
         self._queue.put_nowait(row)
         self._sample_count += 1
 
@@ -337,7 +352,7 @@ class DataLogger:
                     return
         try:
             w = csv.writer(f)
-            w.writerow([
+            header = [
                 "timestamp", "elapsed_s",
                 "mode", "sequence", "step", "frequency_hz",
                 "p1_on", "p2_on", "n1_on", "n2_on",
@@ -345,7 +360,12 @@ class DataLogger:
                 "p2_voltage", "p2_current_a",
                 "n1_voltage", "n1_current_a",
                 "n2_voltage", "n2_current_a",
-            ])
+            ]
+            if self._simulated:
+                # A column rather than a "# simulated" comment line, so
+                # pd.read_csv in tools/ still parses the file unchanged.
+                header.append("source")
+            w.writerow(header)
             rows_since_flush = 0
             while True:
                 item = q.get()

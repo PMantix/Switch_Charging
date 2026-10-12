@@ -7,12 +7,17 @@ Usage:
     python -m tui --host 192.168.1.100     # connect directly
     python -m tui --host 192.168.1.100 --port 5555
     python -m tui --log-level DEBUG        # verbose logging (default WARNING)
+    python -m tui --sim                    # simulation: no Pi needed — starts a
+                                           # local simulated server (runs under a
+                                           # Python >= 3.10 found on PATH; log in
+                                           # ~/SwitchingCircuitV2_logs/sim_server.log)
 
 Press ? in the app for the full key reference.
 """
 
 import argparse
 import logging
+import sys
 
 from tui.app import SwitchingCircuitApp
 
@@ -38,6 +43,12 @@ def main() -> None:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging level (default: WARNING)",
     )
+    parser.add_argument(
+        "--sim",
+        action="store_true",
+        help="Simulation mode: run against a local simulated server with "
+             "synthetic data (no Raspberry Pi / hardware)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -45,8 +56,33 @@ def main() -> None:
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
+    if args.sim:
+        _run_sim()
+        return
+
     app = SwitchingCircuitApp(host=args.host, port=args.port)
     app.run()
+
+
+def _run_sim() -> None:
+    from tui.sim_launcher import SimServer, SimLaunchError
+
+    print("Starting simulated server (no hardware)...", flush=True)
+    try:
+        sim = SimServer.start()
+    except SimLaunchError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(2)
+    app = None
+    try:
+        app = SwitchingCircuitApp(host=sim.host, port=sim.port, sim=True)
+        app.run()
+    finally:
+        # Drop the client first so its receive thread doesn't report the
+        # server going away on the now-restored terminal.
+        if app is not None and app._client is not None:
+            app._client.disconnect()
+        sim.stop()
 
 
 if __name__ == "__main__":

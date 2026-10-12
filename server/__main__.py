@@ -2,15 +2,21 @@
 Switching Circuit V2 - Server Entry Point.
 
 Run with:  python -m server
+           python -m server --sim [--port N]   # no hardware: simulated
+                                               # RP2040, binds 127.0.0.1
+           (SC_SIM=1 in the environment also selects --sim)
 
 Instantiates all subsystems, wires them together, sets up the rotary
 encoder and TM1637 display for local Pi control, and runs until
 SIGINT / SIGTERM.
 """
 
+import argparse
 import logging
+import os
 import signal
 import sys
+from pathlib import Path
 from time import sleep, time
 
 from server.config import (
@@ -18,6 +24,7 @@ from server.config import (
     PIN_ROTARY_CLK, PIN_ROTARY_DT, PIN_ROTARY_BTN,
     SEQUENCES, NUM_SEQUENCES,
     MIN_FREQ, MAX_FREQ,
+    SERVER_HOST, SERVER_PORT,
 )
 from server.gpio_driver import GPIODriver
 from server.sequence_engine import SequenceEngine
@@ -223,13 +230,56 @@ class RotaryController:
 
 
 # ---------------------------------------------------------------------------
+# Simulation mode (no Pi / RP2040 — for demos and training)
+# ---------------------------------------------------------------------------
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+SIM_STATE_FILE = Path.home() / ".switching_circuit_state.sim.json"
+
+
+def _parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="python -m server", description="Switching Circuit V2 server",
+    )
+    parser.add_argument(
+        "--sim", action="store_true",
+        help="Simulation mode: fake RP2040 with synthetic sensor data, "
+             "bind 127.0.0.1 only (also SC_SIM=1)",
+    )
+    parser.add_argument(
+        "--port", type=int, default=SERVER_PORT,
+        help=f"TCP port (default: {SERVER_PORT})",
+    )
+    args = parser.parse_args(argv)
+    if os.environ.get("SC_SIM", "").strip() not in ("", "0"):
+        args.sim = True
+    return args
+
+
+def _enter_sim_mode():
+    """Keep a simulation from touching anything a real server owns: its
+    persisted state goes to a separate file, and the cwd-relative
+    schedules/ directory resolves against the repo root."""
+    from server import state_persistence
+    state_persistence.STATE_FILE = SIM_STATE_FILE
+    os.chdir(_REPO_ROOT)
+    log.warning("=" * 60)
+    log.warning("SIMULATION MODE — not connected to any hardware")
+    log.warning("State file: %s", SIM_STATE_FILE)
+    log.warning("=" * 60)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    args = _parse_args()
+    sim = args.sim
     log.info("Switching Circuit V2 server starting")
+    if sim:
+        _enter_sim_mode()
 
     # Core subsystems
-    gpio = GPIODriver()
+    gpio = GPIODriver(sim=sim)
     engine = SequenceEngine(gpio)
     mc = ModeController(gpio, engine)
 
@@ -275,9 +325,16 @@ def main():
             log.info("Restored persisted settings: %s", saved_state)
         except Exception:
             log.exception("Failed to restore persisted state — starting in IDLE")
+    elif sim:
+        # Fresh simulation: start on a sequence that actually conducts so
+        # pressing charge shows current straight away (sequence 1 is
+        # all-off).
+        engine.set_sequence(1)
 
     # Command server
-    cmd_server = CommandServer(mc, engine)
+    # A simulation is local-only: never expose it on the network.
+    host = "127.0.0.1" if sim else SERVER_HOST
+    cmd_server = CommandServer(mc, engine, host=host, port=args.port)
     cmd_server.start()
 
     # Start sensor streaming at default rate
@@ -286,7 +343,7 @@ def main():
     # Local hardware (rotary + display)
     rotary_ctrl = None
     display_mgr = None
-    if _HAS_LOCAL_HW:
+    if _HAS_LOCAL_HW and not sim:
         try:
             rotary_ctrl = RotaryController(engine, mc)
             display_mgr = DisplayManager(engine)
@@ -321,9 +378,16 @@ def main():
 
     log.info("Server ready — listening on port %d", cmd_server._port)
 
+    # In simulation, exit with the TUI that launched us even if it died
+    # without cleaning up (crash / SIGKILL) — no orphaned sim servers.
+    parent_pid = os.getppid()
+
     # Main loop: poll local hardware
     try:
         while True:
+            if sim and os.getppid() != parent_pid:
+                log.warning("SIMULATION: launcher process exited — shutting down")
+                shutdown_handler(signal.SIGTERM, None)
             if rotary_ctrl:
                 rotary_ctrl.poll()
             if display_mgr and rotary_ctrl:

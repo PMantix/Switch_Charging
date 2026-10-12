@@ -36,10 +36,15 @@ class ConnectionBar(Widget):
     # Pi reachable but its RP2040 link is down (sensor data frozen).
     link_down: reactive[bool] = reactive(False)
     probe_text: reactive[str] = reactive("")
+    # Talking to the local simulated server (python -m tui --sim).
+    sim: reactive[bool] = reactive(False)
     _auto_data: dict = {}
 
     def render(self) -> Text:
         t = Text()
+
+        if self.sim:
+            t.append(" SIM ", style="bold white on magenta")
 
         if self.connected and self.link_down:
             t.append(" \u26a0 ", style="bold yellow")
@@ -114,4 +119,7 @@ class ConnectionBar(Widget):
         self.refresh()
 
     def watch_probe_text(self, _: str) -> None:
+        self.refresh()
+
+    def watch_sim(self, _: bool) -> None:
         self.refresh()

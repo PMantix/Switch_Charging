@@ -36,6 +36,7 @@ from tui.widgets.auto_panel import AutoPanel
 from tui.widgets.connection_bar import ConnectionBar
 from tui.widgets.mascot import Mascot
 from tui.widgets.schedule_screen import SchedulePickerScreen, SchedulePreviewScreen
+from tui.widgets.sim_banner import SimBanner
 
 log = logging.getLogger(__name__)
 
@@ -383,6 +384,10 @@ class HelpScreen(ModalScreen[None]):
                 "  [bold]B[/]         INA226 calibration wizard\n"
                 "  [bold]D[/]         Latency probe on/off\n"
                 "  [bold]?[/]         This help    [bold]q[/]  Quit\n\n"
+                "[bold white]SIMULATION[/]  [dim](python -m tui --sim)[/]\n"
+                "  Runs a local simulated Pi — no hardware. Numbers are\n"
+                "  plausible, not physical. A / C / P / E / O are disabled;\n"
+                "  l records on the Mac as SIM_*.csv (source=SIMULATION).\n\n"
                 "[bold white]STATUS[/]\n"
                 "  [bold yellow]RP2040 LINK DOWN[/]: the Pi is reachable but lost its\n"
                 "  serial link to the RP2040, so sensor data is frozen and\n"
@@ -531,6 +536,10 @@ class SwitchingCircuitApp(App):
     .hidden {
         display: none;
     }
+    /* Simulation: magenta frame around everything (see SimBanner). */
+    #main-layout.sim {
+        border: heavy magenta;
+    }
     """
 
     BINDINGS = [
@@ -604,15 +613,18 @@ class SwitchingCircuitApp(App):
     _WARMUP_S = 0.2       # seconds of reduced update rate after first data
     _WARMUP_FPS = 3       # max frames/sec during warmup
 
-    def __init__(self, host: str = "", port: int = 5555):
+    def __init__(self, host: str = "", port: int = 5555, sim: bool = False):
         super().__init__()
         self._initial_host = host
         self._initial_port = port
+        # Simulation mode (python -m tui --sim): connected to a local
+        # simulated server, Pi-only actions disabled, loudly labelled.
+        self._sim = sim
         self._client: Optional[PiClient] = None
         self._circuit_mode = "idle"
         self._current_freq = 1.0
         self._current_seq = 0
-        self._data_logger = DataLogger()
+        self._data_logger = DataLogger(simulated=sim)
         self._first_state_time = 0.0     # monotonic time of first state update
         self._last_apply_time = 0.0      # last time _apply_state ran
         self._showing_auto_panel = False  # right column: status vs auto panel
@@ -623,7 +635,7 @@ class SwitchingCircuitApp(App):
         self._offset_worker_started = False
         self._last_probe_display_ns = 0
         self._state_pending = False  # backpressure: skip if prior frame not consumed
-        self._current_pi_name = ""   # e.g. "SW4" — derived from SSID
+        self._current_pi_name = "SIM" if sim else ""  # e.g. "SW4" — derived from SSID
         self._fleet_cache: list = []
         # Launch-time WiFi prescan: overlaps with auto-discovery so the
         # ConnectDialog can show nearby pi_SW# APs the moment it opens.
@@ -631,13 +643,18 @@ class SwitchingCircuitApp(App):
         self._prescan_lock = _threading.Lock()
         self._prescan_result = None
         self._prescan_at = 0.0
+        if sim:
+            self.title = "SIMULATION — Switching Circuit V2"
+            self.sub_title = "NOT CONNECTED TO HARDWARE"
 
     # -- Compose -------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
         yield Header()
+        if self._sim:
+            yield SimBanner(id="sim-banner")
         yield ConnectionBar(id="conn-bar")
-        with Horizontal(id="main-layout"):
+        with Horizontal(id="main-layout", classes="sim" if self._sim else ""):
             with Vertical(id="left-col"):
                 yield LeftPanel(id="left-panel")
                 yield Mascot(id="mascot")
@@ -671,7 +688,9 @@ class SwitchingCircuitApp(App):
                 plot_width = center_width - 62
                 plot.available_width = max(60, plot_width)
                 # Full terminal height minus header(1), conn bar(1), footer(1)
-                plot.available_height = max(20, event.size.height - 3)
+                # (+ sim banner(3) and the magenta frame(2) in simulation)
+                chrome = 3 + (5 if self._sim else 0)
+                plot.available_height = max(20, event.size.height - chrome)
             else:
                 plot.available_width = max(60, center_width - 4)
                 plot.available_height = max(20, event.size.height // 2)
@@ -707,6 +726,8 @@ class SwitchingCircuitApp(App):
             max_retries=30,
         )
 
+        if self._sim:
+            self.query_one("#conn-bar", ConnectionBar).sim = True
         if self._initial_host:
             self._do_connect(self._initial_host, self._initial_port)
         else:
@@ -824,7 +845,8 @@ class SwitchingCircuitApp(App):
             None, self._client.connect, host, port
         )
         if connected:
-            save_host(host)
+            if not self._sim:  # don't make 127.0.0.1 the next real launch's guess
+                save_host(host)
             # Pre-subscribe sensor-profile fetch. Safe now that the recv
             # thread doesn't start until subscribe() — send_command can
             # readline() its reply directly without the race that froze
@@ -1512,14 +1534,24 @@ class SwitchingCircuitApp(App):
                 return
 
     def _show_duration(self) -> None:
-        from tui.data_logger import select_tier
         dur = self._data_logger.duration_s
-        tier = select_tier(dur)
+        tier = self._data_logger.tier_for(dur)
         if dur >= 60:
             dur_str = f"{dur/60:.0f}min"
         else:
             dur_str = f"{dur:.0f}s"
         self.notify(f"Record: {dur_str} -> {tier.value}", title="Duration")
+
+    # -- Simulation -----------------------------------------------------------
+
+    def _sim_blocked(self, what: str) -> bool:
+        """In simulation, refuse a Pi-only action with a notice. Returns
+        True when the caller should stop."""
+        if not self._sim:
+            return False
+        self.notify(f"{what}: not available in simulation",
+                    title="SIMULATION", severity="warning")
+        return True
 
     # -- Actions: Help & Reconnect -------------------------------------------
 
@@ -1527,6 +1559,10 @@ class SwitchingCircuitApp(App):
         self.push_screen(HelpScreen())
 
     def action_reconnect(self) -> None:
+        if self._sim:
+            # No Pis to pick from — just reconnect to the local sim server.
+            self._switch_pi(self._initial_host)
+            return
         if self._client:
             self._client.disconnect()
         # Kick off a fresh prescan; if an earlier one is still fresh the
@@ -1574,6 +1610,8 @@ class SwitchingCircuitApp(App):
     # -- Data offload -------------------------------------------------------
 
     def action_offload(self) -> None:
+        if self._sim_blocked("Offload from Pi"):
+            return
         if not self._client or self._client.connection_state != ConnectionState.CONNECTED:
             self.notify("Not connected to a Pi", severity="warning")
             return
@@ -1743,6 +1781,8 @@ class SwitchingCircuitApp(App):
         retargets the client at 10.42.0.1 so the TUI reconnects once the
         MacBook is moved onto the new SSID. Over Ethernet it only turns the
         Pi's AP on and stays connected."""
+        if self._sim_blocked("AP mode (A)"):
+            return
         if not self._client or self._client.connection_state != ConnectionState.CONNECTED:
             return
         password = wifi_scan.DEFAULT_AP_PASSWORD
@@ -1781,6 +1821,8 @@ class SwitchingCircuitApp(App):
     def action_client_mode(self) -> None:
         """Ask the Pi to drop AP mode and return to client WiFi. Over
         Ethernet this just turns the AP off and stays connected."""
+        if self._sim_blocked("Client WiFi mode (C)"):
+            return
         if not self._client or self._client.connection_state != ConnectionState.CONNECTED:
             return
         label = self._eth_pi_label()
@@ -1858,6 +1900,8 @@ class SwitchingCircuitApp(App):
 
     def action_switch_pi(self) -> None:
         """Open the Pi picker to swap the active Pi."""
+        if self._sim_blocked("Switch Pi (P)"):
+            return
         if self._data_logger.is_logging:
             self.notify(
                 "Stop the active recording (l) before switching Pis.",
@@ -1883,6 +1927,8 @@ class SwitchingCircuitApp(App):
 
     def action_switch_pi_eth(self) -> None:
         """Open the Ethernet picker to swap the active Pi."""
+        if self._sim_blocked("Switch Pi over Ethernet (E)"):
+            return
         if self._data_logger.is_logging:
             self.notify(
                 "Stop the active recording (l) before switching Pis.",
@@ -1916,7 +1962,8 @@ class SwitchingCircuitApp(App):
         self._reset_pi_state()
         self._client.disconnect()
         self._client._stop_event.clear()
-        save_host(new_host)
+        if not self._sim:
+            save_host(new_host)
         self._do_connect(new_host, self._initial_port)
 
     def _reset_pi_state(self) -> None:
