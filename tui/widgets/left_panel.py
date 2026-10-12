@@ -9,6 +9,9 @@ from rich.text import Text
 class LeftPanel(Widget):
     """Keyboard controls reference (mode/sequence shown in right panel)."""
 
+    # Set by the app in --coincell mode: finer auto-follow steps + banner.
+    coincell: bool = False
+
     DEFAULT_CSS = """
     LeftPanel {
         width: 100%;
@@ -22,6 +25,13 @@ class LeftPanel(Widget):
 
         t.append(" KEY BINDINGS\n", style="bold cyan underline")
         t.append("\n")
+        if self.coincell:
+            t.append(" COIN-CELL MODE\n", style="bold black on yellow")
+            t.append(" AVG 128, current in \u00b5A\n", style="dim")
+            t.append(" i then z to zero offsets\n", style="dim")
+            t.append(" u to leave\n\n", style="dim")
+        enter_step = "0.1mA" if self.coincell else "1mA"
+        exit_step = "0.05mA" if self.coincell else "0.5mA"
 
         sections = [
             ("FREQUENCY", [
@@ -46,9 +56,9 @@ class LeftPanel(Widget):
             ("AUTO-FOLLOW", [
                 ("  F  ", "Toggle"),
                 ("  T  ", "Cycle target"),
-                (" ,/. ", "I_enter -/+1mA"),
-                (" ;/' ", "I_exit -/+0.5mA"),
-                (" </> ", "CC setpoint"),
+                (" ,/. ", f"I_enter -/+{enter_step}"),
+                (" ;/' ", f"I_exit -/+{exit_step}"),
+                (" </> ", "CC set 0-100mA" if self.coincell else "CC setpoint"),
             ]),
             ("SCHEDULE MONITOR", [
                 ("  a  ", "Load schedule"),
@@ -56,6 +66,8 @@ class LeftPanel(Widget):
             ]),
             ("CALIBRATE", [
                 ("  B  ", "INA226 Cal Wizard"),
+                ("  z  ", "Zero current (idle)"),
+                ("  u  ", "Coin-cell mode"),
             ]),
             ("NETWORK", [
                 ("  P  ", "Switch Pi (WiFi)"),

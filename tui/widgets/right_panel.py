@@ -43,6 +43,16 @@ MODE_KEYS = {
 }
 
 
+def _fmt_ma(ma: float) -> str:
+    """mA with enough decimals for coin-cell (0.1 mA steps, thresholds at
+    35%/15% of that) without cluttering the normal tens-of-mA values."""
+    if abs(ma) < 10:
+        return f"{ma:.2f}"
+    if abs(ma) < 100:
+        return f"{ma:.1f}"
+    return f"{ma:.0f}"
+
+
 class RightPanel(Widget):
     """Status, frequency, sequence, and mode."""
 
@@ -252,7 +262,7 @@ class RightPanel(Widget):
         t.append("\n")
 
         t.append(" Enter  ", style="dim")
-        t.append(f" {i_enter_ma:5.1f} mA ", style="bold white")
+        t.append(f" {_fmt_ma(i_enter_ma):>5} mA ", style="bold white")
         t.append("  ", style="dim")
         t.append(" , ", style="bold white on dark_blue")
         t.append(" / ", style="dim")
@@ -260,7 +270,7 @@ class RightPanel(Widget):
         t.append("\n")
 
         t.append(" Exit   ", style="dim")
-        t.append(f" {i_exit_ma:5.1f} mA ", style="bold white")
+        t.append(f" {_fmt_ma(i_exit_ma):>5} mA ", style="bold white")
         t.append("  ", style="dim")
         t.append(" ; ", style="bold white on dark_blue")
         t.append(" / ", style="dim")
@@ -270,7 +280,7 @@ class RightPanel(Widget):
         # CC setpoint + recommendations
         t.append(" CC set ", style="dim")
         if cc_ma > 0:
-            t.append(f" {cc_ma:5.0f} mA ", style="bold white")
+            t.append(f" {_fmt_ma(cc_ma):>5} mA ", style="bold white")
         else:
             t.append("   off  ", style="dim")
         t.append("  ", style="dim")
@@ -281,7 +291,7 @@ class RightPanel(Widget):
 
         if cc_ma > 0:
             t.append("  rec   ", style="dim")
-            t.append(f" {rec_enter_ma:.0f}/{rec_exit_ma:.0f} mA", style="italic yellow")
+            t.append(f" {_fmt_ma(rec_enter_ma)}/{_fmt_ma(rec_exit_ma)} mA", style="italic yellow")
             t.append("\n")
 
         t.append(" Live i ", style="dim")

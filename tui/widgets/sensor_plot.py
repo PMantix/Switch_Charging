@@ -120,6 +120,10 @@ class SensorPlot(Widget):
     # rendered as bar_row_height stacked block characters (BAR_BLOCKS gives
     # 8 levels per row, so total resolution = bar_row_height * 8).
     bar_row_height: reactive[int] = reactive(3)
+    # Display scale for current traces: A -> mA normally, A -> uA in
+    # coin-cell mode (set by the app before first render).
+    i_mult: float = 1000.0
+    i_unit: str = "mA"
 
     # Expanded plot sizing is driven by the available_width / available_height
     # reactives set by the app's on_resize handler.
@@ -547,7 +551,7 @@ class SensorPlot(Widget):
             hist = history.get(name, [])
             if hist:
                 v_series[SENSOR_COLORS[name]] = [v for _, v, _ in hist]
-                i_series[SENSOR_COLORS[name]] = [i * 1000 for _, _, i in hist]
+                i_series[SENSOR_COLORS[name]] = [i * self.i_mult for _, _, i in hist]
 
         stretch = self._stretch_active()
         v_fixed = None if self.auto_v_range else self.v_range
@@ -571,13 +575,13 @@ class SensorPlot(Widget):
         if mode in ("line", "dot"):
             i_rows, (i_mn, i_mx) = self._build_braille_plot(
                 i_series, pw, ph, connect, stretch=stretch, fixed_range=i_fixed)
-            self._render_plot_header(t, "CURRENT", "bold green", i_mn, i_mx, "mA")
+            self._render_plot_header(t, "CURRENT", "bold green", i_mn, i_mx, self.i_unit)
             self._render_braille_rows(t, i_rows, pw)
         else:
             bh = max(1, self.bar_row_height)
             bar_data, (i_mn, i_mx) = self._build_bar_plot(
                 i_series, pw, bh, stretch=stretch, fixed_range=i_fixed)
-            self._render_plot_header(t, "CURRENT", "bold green", i_mn, i_mx, "mA")
+            self._render_plot_header(t, "CURRENT", "bold green", i_mn, i_mx, self.i_unit)
             self._render_bar_rows(t, bar_data, pw)
 
         # Bottom-right info: samples/cycle + truncation warning.
@@ -653,7 +657,7 @@ class SensorPlot(Widget):
 
             # Extract voltage and current series
             v_vals = [v for _, v, _ in hist] if hist else []
-            i_vals = [i * 1000 for _, _, i in hist] if hist else []
+            i_vals = [i * self.i_mult for _, _, i in hist] if hist else []
 
             v_series = {color: v_vals}
             i_series = {color: i_vals}
@@ -671,7 +675,7 @@ class SensorPlot(Widget):
                 t.append(f"{v_mn:.2f}-{v_mx:.2f}V", style="dim")
                 range_gap = col_w - 10
                 t.append(" " * max(1, range_gap), style="dim")
-                t.append(f"  {i_mn:.1f}-{i_mx:.1f}mA\n", style="dim")
+                t.append(f"  {i_mn:.1f}-{i_mx:.1f}{self.i_unit}\n", style="dim")
 
                 # Single-series builds \u2014 one entry per side, ph rows each.
                 _, v_rows = v_bar[0] if v_bar else ("", [])
@@ -709,7 +713,7 @@ class SensorPlot(Widget):
                 t.append(f"{v_mn:.2f}-{v_mx:.2f}V", style="dim")
                 range_gap = col_w - 10
                 t.append(" " * max(1, range_gap), style="dim")
-                t.append(f"  {i_mn:.1f}-{i_mx:.1f}mA\n", style="dim")
+                t.append(f"  {i_mn:.1f}-{i_mx:.1f}{self.i_unit}\n", style="dim")
 
                 # Render braille rows side-by-side
                 for row_idx in range(ph):

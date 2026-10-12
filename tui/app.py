@@ -359,9 +359,10 @@ class HelpScreen(ModalScreen[None]):
                 "[bold white]AUTO-FOLLOW[/]\n"
                 "  [bold]F[/]         Toggle auto-follow on/off\n"
                 "  [bold]T[/]         Cycle target (charge / pulse)\n"
-                "  [bold], / .[/]     I_enter -/+ 1 mA\n"
-                "  [bold]; / '[/]     I_exit -/+ 0.5 mA\n"
-                "  [bold]< / >[/]     CC setpoint -/+\n\n"
+                "  [bold], / .[/]     I_enter -/+ 1 mA   [dim](0.1 mA coin-cell)[/]\n"
+                "  [bold]; / '[/]     I_exit -/+ 0.5 mA  [dim](0.05 mA coin-cell)[/]\n"
+                "  [bold]< / >[/]     CC setpoint -/+  [dim](coin-cell: 0.1 mA)[/]\n"
+                "            [dim]also sets I_enter/I_exit to 35% / 15% of it[/]\n\n"
                 "[bold white]SCHEDULE MONITOR[/]  [dim](Tab to view)[/]\n"
                 "  [bold]a[/]         Load a schedule to monitor\n"
                 "            [dim](does not change the circuit mode)[/]\n"
@@ -382,12 +383,24 @@ class HelpScreen(ModalScreen[None]):
                 "[bold white]OTHER[/]\n"
                 "  [bold]Tab[/]       Right column: Status <-> Schedule monitor\n"
                 "  [bold]B[/]         INA226 calibration wizard\n"
+                "  [bold]z[/]         Zero current offsets [dim](idle only, ~2 s;\n"
+                "            saved to RP2040 flash, used in every mode)[/]\n"
                 "  [bold]D[/]         Latency probe on/off\n"
                 "  [bold]?[/]         This help    [bold]q[/]  Quit\n\n"
                 "[bold white]SIMULATION[/]  [dim](python -m tui --sim)[/]\n"
                 "  Runs a local simulated Pi — no hardware. Numbers are\n"
                 "  plausible, not physical. A / C / P / E / O are disabled;\n"
                 "  l records on the Mac as SIM_*.csv (source=SIMULATION).\n\n"
+                "[bold white]COIN-CELL MODE[/]  [dim](u, or python -m tui --coincell)[/]\n"
+                "  For mA-scale cells. INA226 AVG=128 (~11 fresh readings/s),\n"
+                "  current plotted in µA with auto range, auto-follow\n"
+                "  thresholds 1.0 / 0.5 mA with finer , . ; ' steps, and\n"
+                "  CC setpoint 0-100 mA: 0.1 mA per press; hold to step\n"
+                "  faster above 5 mA (0.5 to 10, 1 to 20, 5 to 100 mA).\n"
+                "  Press [bold]i[/] then [bold]z[/] with no current flowing to zero the\n"
+                "  offsets. Normal AVG / thresholds / CC setpoint are put\n"
+                "  back on u or quit. Resolution floor:\n"
+                "  25 µA (0.1 Ω shunt). Works with --sim.\n\n"
                 "[bold white]STATUS[/]\n"
                 "  [bold yellow]RP2040 LINK DOWN[/]: the Pi is reachable but lost its\n"
                 "  serial link to the RP2040, so sensor data is frozen and\n"
@@ -597,6 +610,8 @@ class SwitchingCircuitApp(App):
         Binding("O", "offload", "Offload", show=False),
         Binding("B", "calibrate", "Calibrate", show=False),
         Binding("R", "toggle_plot_range", "Range", show=False),
+        Binding("z", "zero_current", "Zero I", show=False),
+        Binding("u", "toggle_coincell", "Coin-cell", show=False),
         # Keyboard fallback for scrolling on small screens (wheel also works).
         Binding("pagedown", "scroll_col('center-col', 1)", "Scroll", show=False),
         Binding("pageup", "scroll_col('center-col', -1)", "Scroll", show=False),
@@ -613,13 +628,21 @@ class SwitchingCircuitApp(App):
     _WARMUP_S = 0.2       # seconds of reduced update rate after first data
     _WARMUP_FPS = 3       # max frames/sec during warmup
 
-    def __init__(self, host: str = "", port: int = 5555, sim: bool = False):
+    def __init__(self, host: str = "", port: int = 5555, sim: bool = False,
+                 coincell: bool = False):
         super().__init__()
         self._initial_host = host
         self._initial_port = port
         # Simulation mode (python -m tui --sim): connected to a local
         # simulated server, Pi-only actions disabled, loudly labelled.
         self._sim = sim
+        # Coin-cell mode (python -m tui --coincell, or u at runtime): heavy
+        # averaging, uA display, mA-scale auto-follow thresholds. The Pi
+        # persists AVG and thresholds, so we snapshot them when entering
+        # and put them back on toggle-off or exit (leave_coincell).
+        self._coincell = coincell
+        self._coincell_restore: Optional[dict] = None
+        self._zero_samples: Optional[list] = None
         self._client: Optional[PiClient] = None
         self._circuit_mode = "idle"
         self._current_freq = 1.0
@@ -646,6 +669,7 @@ class SwitchingCircuitApp(App):
         if sim:
             self.title = "SIMULATION — Switching Circuit V2"
             self.sub_title = "NOT CONNECTED TO HARDWARE"
+        self._base_sub_title = self.sub_title
 
     # -- Compose -------------------------------------------------------------
 
@@ -699,6 +723,8 @@ class SwitchingCircuitApp(App):
 
     def on_mount(self) -> None:
         """Initialize client and connect."""
+        if self._coincell:
+            self._apply_coincell_display()
         # Disable terminal mouse tracking. This TUI is entirely
         # keyboard-driven; mouse motion over the sensor plots triggers a
         # flood of MouseMove events which compete with state updates in the
@@ -861,6 +887,10 @@ class SwitchingCircuitApp(App):
                 )
             except Exception:
                 profile = None
+            if self._coincell:
+                coin = await loop.run_in_executor(None, self._enter_coincell)
+                if coin:
+                    profile = coin
             # Subscribe to the state stream (also starts the recv thread).
             await loop.run_in_executor(None, self._client.subscribe)
             if profile:
@@ -962,6 +992,8 @@ class SwitchingCircuitApp(App):
             rpanel.current_path = STATE_PATHS[state_idx] if 0 <= state_idx <= 5 else ""
 
             sensors = data.get("sensors", {})
+            if self._zero_samples is not None:
+                self._collect_zero_sample(sensors)
             cal_sink = getattr(self, "_cal_sample_sink", None)
             if cal_sink is not None:
                 try:
@@ -1607,6 +1639,183 @@ class SwitchingCircuitApp(App):
             else:
                 self.notify(f"{names[ch]} calibration failed", severity="error")
 
+    # -- Coin-cell mode -----------------------------------------------------
+
+    # AVG=128 at 332 us shunt + 332 us bus conversions is ~85 ms per fresh
+    # reading (~11 Hz): noise well under one 25 uA LSB, still responsive.
+    COINCELL_AVG = 128
+    COINCELL_I_ENTER_A = 0.0010
+    COINCELL_I_EXIT_A = 0.0005
+    ZERO_SAMPLE_TARGET = 60   # ~2 s of the <=30 Hz state stream
+
+    def _snapshot_normal(self, avg, i_enter, i_exit, cc) -> None:
+        """Remember the Pi's normal AVG / thresholds / CC setpoint (once
+        per entry)."""
+        if self._coincell_restore is not None:
+            return
+        # A previous coin-cell session that didn't exit cleanly leaves its
+        # profile persisted on the Pi; don't "restore" to that.
+        if avg == self.COINCELL_AVG:
+            avg = 4
+        if i_enter == self.COINCELL_I_ENTER_A:
+            i_enter, i_exit, cc = 0.050, 0.020, 0.0
+        self._coincell_restore = {"avg": avg, "i_enter_a": i_enter,
+                                  "i_exit_a": i_exit, "cc_setpoint_a": cc}
+
+    def _coincell_cmds(self) -> list:
+        # CC setpoint starts off so < / > walk the 0.1 mA ladder from 0
+        # instead of sitting on a normal-mode value (restored on exit).
+        return [
+            {"cmd": "set_ina226_avg", "avg": self.COINCELL_AVG},
+            {"cmd": "auto_follow_set_cc_setpoint", "cc_setpoint_a": 0.0},
+            {"cmd": "auto_follow_set_thresholds",
+             "i_enter_a": self.COINCELL_I_ENTER_A,
+             "i_exit_a": self.COINCELL_I_EXIT_A},
+        ]
+
+    def _restore_cmds(self) -> list:
+        r = self._coincell_restore or {}
+        cmds = []
+        # CC setpoint first: the server doesn't derive thresholds from it,
+        # but keep the order the TUI itself uses (setpoint, then thresholds).
+        if r.get("cc_setpoint_a") is not None:
+            cmds.append({"cmd": "auto_follow_set_cc_setpoint",
+                         "cc_setpoint_a": r["cc_setpoint_a"]})
+        if r.get("avg"):
+            cmds.append({"cmd": "set_ina226_avg", "avg": int(r["avg"])})
+        if r.get("i_enter_a") is not None and r.get("i_exit_a") is not None:
+            cmds.append({"cmd": "auto_follow_set_thresholds",
+                         "i_enter_a": r["i_enter_a"], "i_exit_a": r["i_exit_a"]})
+        return cmds
+
+    def _apply_coincell_display(self) -> None:
+        """Switch plot units / range, left-panel hints and subtitle to match
+        self._coincell."""
+        plot = self.query_one("#sensor-plot", SensorPlot)
+        lpanel = self.query_one("#left-panel", LeftPanel)
+        if self._coincell:
+            self._normal_auto_i_range = plot.auto_i_range
+            plot.i_mult, plot.i_unit = 1e6, "\u00b5A"
+            plot.auto_i_range = True
+            tag = "COIN-CELL MODE (\u00b5A, z = zero current, u = leave)"
+            self.sub_title = f"{self._base_sub_title} · {tag}" if self._base_sub_title else tag
+        else:
+            plot.i_mult, plot.i_unit = 1000.0, "mA"
+            plot.auto_i_range = getattr(self, "_normal_auto_i_range", False)
+            self.sub_title = self._base_sub_title
+        lpanel.coincell = self._coincell
+        lpanel.refresh()
+        plot.refresh()
+
+    def _enter_coincell(self) -> Optional[dict]:
+        """Apply the coin-cell sensor profile and thresholds. Runs in an
+        executor before subscribe() so send_command gets real replies.
+        Returns the set_ina226_avg reply for _apply_profile_reply."""
+        c = self._client
+        if c is None:
+            return None
+        if self._coincell_restore is None:
+            prof = c.send_command({"cmd": "get_sensor_profile"}) or {}
+            af = (c.send_command({"cmd": "auto_follow_status"}) or {}).get("auto_follow") or {}
+            self._snapshot_normal(prof.get("avg"), af.get("i_enter_a"), af.get("i_exit_a"),
+                                  af.get("cc_setpoint_a"))
+        replies = [c.send_command(cmd) for cmd in self._coincell_cmds()]
+        return replies[0]
+
+    def action_toggle_coincell(self) -> None:
+        """u: enter / leave coin-cell mode on the live connection."""
+        if not self._client or self._client.connection_state != ConnectionState.CONNECTED:
+            self.notify("Connect to a Pi first", severity="warning")
+            return
+        plot = self.query_one("#sensor-plot", SensorPlot)
+        # Subscribed, so replies don't come back: snapshot from the TUI's
+        # own mirrors and fire-and-forget the commands.
+        if not self._coincell:
+            af = self._latest_auto_follow or {}
+            self._snapshot_normal(plot.ina_avg, af.get("i_enter_a"), af.get("i_exit_a"),
+                                  af.get("cc_setpoint_a"))
+            cmds = self._coincell_cmds()
+            plot.ina_avg = self.COINCELL_AVG
+        else:
+            cmds = self._restore_cmds()
+            plot.ina_avg = int((self._coincell_restore or {}).get("avg") or plot.ina_avg)
+            self._coincell_restore = None
+        for cmd in cmds:
+            self._client.send_async(cmd)
+        self._coincell = not self._coincell
+        self._apply_coincell_display()
+        if self._coincell:
+            self.notify("AVG 128, current in \u00b5A, auto-follow 1.0 / 0.5 mA. "
+                        "Press i then z to zero offsets.", title="Coin-cell mode ON")
+        else:
+            self.notify("Normal AVG and auto-follow thresholds restored.",
+                        title="Coin-cell mode OFF")
+
+    def leave_coincell(self) -> bool:
+        """Put back the AVG / auto-follow thresholds the Pi had before
+        coin-cell mode. Called from __main__ after the app exits. Returns
+        True if anything was restored."""
+        import json
+        import socket
+
+        c = self._client
+        if not self._coincell_restore or c is None or not c.host:
+            return False
+        cmds = self._restore_cmds()
+        # Fresh unsubscribed connection: the main one only fires and
+        # forgets once subscribed, and the process exits right after this,
+        # so wait for each reply to know the Pi actually applied it.
+        try:
+            with socket.create_connection((c.host, c.port), timeout=3.0) as s:
+                rfile = s.makefile("r", encoding="utf-8")
+                for cmd in cmds:
+                    s.sendall((json.dumps(cmd) + "\n").encode("utf-8"))
+                    rfile.readline()
+        except OSError as exc:
+            log.warning("coin-cell restore failed: %s", exc)
+            return False
+        self._coincell_restore = None
+        return True
+
+    def action_zero_current(self) -> None:
+        """Average a couple of seconds of current per channel and fold it
+        into each channel's calibration offset on the RP2040."""
+        if not self._client or self._client.connection_state != ConnectionState.CONNECTED:
+            self.notify("Connect to a Pi first", severity="warning")
+            return
+        if self._circuit_mode != "idle":
+            self.notify("Switch to idle (i) before zeroing — no current may flow",
+                        severity="warning")
+            return
+        if self._zero_samples is not None:
+            return
+        self._zero_samples = []
+        self.notify("Zeroing current — hold still ~2 s", title="Zero")
+
+    def _collect_zero_sample(self, sensors: dict) -> None:
+        names = ["P1", "P2", "N1", "N2"]
+        samples = self._zero_samples
+        if samples is None:
+            return
+        samples.append([float((sensors.get(n) or {}).get("current", 0.0)) for n in names])
+        if len(samples) < self.ZERO_SAMPLE_TARGET:
+            return
+        self._zero_samples = None
+        means = [sum(col) / len(col) for col in zip(*samples)]
+        self.run_worker(self._send_zero(means), name="zero", group="zero", exclusive=True)
+
+    async def _send_zero(self, means: list) -> None:
+        # The state stream is subscribed, so send_command won't return the
+        # server's reply — the offsets show up in the next readings instead.
+        import asyncio
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None, self._client.send_command,
+            {"cmd": "zero_current", "measured_a": [round(m, 7) for m in means]},
+        )
+        txt = "  ".join(f"{n} {m * 1e6:+.0f}\u00b5A" for n, m in zip(["P1", "P2", "N1", "N2"], means))
+        self.notify(f"Removed offsets: {txt}", title="Zero")
+
     # -- Data offload -------------------------------------------------------
 
     def action_offload(self) -> None:
@@ -1711,17 +1920,21 @@ class SwitchingCircuitApp(App):
         nxt = "pulse_charge" if cur == "charge" else "charge"
         self._send_auto_follow({"cmd": "auto_follow_set_target", "target_mode": nxt})
 
+    def _af_step(self, normal: float) -> float:
+        # Coin-cell thresholds sit around 1 mA, so step 10x finer.
+        return normal / 10 if self._coincell else normal
+
     def action_auto_follow_enter_up(self) -> None:
-        self._adjust_auto_follow(d_enter=0.001)
+        self._adjust_auto_follow(d_enter=self._af_step(0.001))
 
     def action_auto_follow_enter_down(self) -> None:
-        self._adjust_auto_follow(d_enter=-0.001)
+        self._adjust_auto_follow(d_enter=-self._af_step(0.001))
 
     def action_auto_follow_exit_up(self) -> None:
-        self._adjust_auto_follow(d_exit=0.0005)
+        self._adjust_auto_follow(d_exit=self._af_step(0.0005))
 
     def action_auto_follow_exit_down(self) -> None:
-        self._adjust_auto_follow(d_exit=-0.0005)
+        self._adjust_auto_follow(d_exit=-self._af_step(0.0005))
 
     def _adjust_auto_follow(self, d_enter: float = 0.0, d_exit: float = 0.0) -> None:
         af = self._latest_auto_follow or {}
@@ -1738,6 +1951,49 @@ class SwitchingCircuitApp(App):
     CC_SETPOINT_STEPS = [
         0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0,
     ]
+    # Coin-cell CC setpoint, in units of 0.1 mA: 0 - 100 mA. A single
+    # press always moves 0.1 mA; holding the key (terminal auto-repeat)
+    # moves in the region's coarse step, snapped to that step's grid.
+    COINCELL_CC_MAX_TENTHS = 1000
+    # Repeats arrive ~30 ms apart; deliberate presses are much slower.
+    CC_HOLD_GAP_S = 0.15
+
+    @staticmethod
+    def _coincell_cc_hold_step(tenths: int) -> int:
+        """Held-key step (0.1 mA units) for the region containing tenths."""
+        if tenths < 50:
+            return 1     # 0.1 mA up to 5 mA
+        if tenths < 100:
+            return 5     # 0.5 mA up to 10 mA
+        if tenths < 200:
+            return 10    # 1 mA up to 20 mA
+        return 50        # 5 mA up to 100 mA
+
+    def _step_coincell_cc(self, direction: int) -> None:
+        import time
+        now = time.monotonic()
+        last_dir, last_t = getattr(self, "_cc_last_press", (0, 0.0))
+        held = direction == last_dir and now - last_t < self.CC_HOLD_GAP_S
+        self._cc_last_press = (direction, now)
+        # Auto-follow status lags the key repeat, so while keys are coming
+        # in build on what we last sent rather than the echoed value.
+        pend, pend_t = getattr(self, "_cc_pending", (None, 0.0))
+        if pend is not None and now - pend_t < 1.0:
+            cur = pend
+        else:
+            cur = round((self._latest_auto_follow or {}).get("cc_setpoint_a", 0.0) * 10000)
+        if not held:
+            new = cur + direction
+        elif direction > 0:
+            st = self._coincell_cc_hold_step(cur)
+            new = (cur // st + 1) * st
+        else:
+            st = self._coincell_cc_hold_step(cur - 1)
+            new = ((cur - 1) // st) * st
+        new = max(0, min(self.COINCELL_CC_MAX_TENTHS, new))
+        self._cc_pending = (new, now)
+        if new != cur:
+            self._set_cc_setpoint(round(new / 10000, 4))
 
     def _set_cc_setpoint(self, cc_a: float) -> None:
         """Set CC setpoint and auto-apply recommended enter/exit thresholds."""
@@ -1752,18 +2008,24 @@ class SwitchingCircuitApp(App):
             })
 
     def action_auto_follow_cc_up(self) -> None:
+        if self._coincell:
+            self._step_coincell_cc(+1)
+            return
         af = self._latest_auto_follow or {}
         cur = af.get("cc_setpoint_a", 0.0)
         for s in self.CC_SETPOINT_STEPS:
-            if s > cur + 0.0001:
+            if s > cur + 1e-6:
                 self._set_cc_setpoint(s)
                 return
 
     def action_auto_follow_cc_down(self) -> None:
+        if self._coincell:
+            self._step_coincell_cc(-1)
+            return
         af = self._latest_auto_follow or {}
         cur = af.get("cc_setpoint_a", 0.0)
         for s in reversed(self.CC_SETPOINT_STEPS):
-            if s < cur - 0.0001:
+            if s < cur - 1e-6:
                 self._set_cc_setpoint(s)
                 return
 

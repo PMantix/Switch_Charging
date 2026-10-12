@@ -362,6 +362,26 @@ class CommandServer:
                     return {"ok": False, "error": "Failed to query calibration"}
                 return {"ok": True, "calibration": cal}
 
+            elif cmd == "zero_current":
+                # Tare: the TUI averaged each channel's (already calibrated)
+                # current with no current flowing. Fold that residual into
+                # each channel's offset, keeping its gain.
+                measured = msg.get("measured_a")
+                if not isinstance(measured, list) or len(measured) != 4:
+                    return {"ok": False, "error": "Need measured_a: [P1, P2, N1, N2]"}
+                cal = self._mc._gpio.get_calibration()
+                if cal is None:
+                    return {"ok": False, "error": "Failed to query calibration"}
+                applied = {}
+                for ch, m in enumerate(measured):
+                    gain, offset = cal.get(ch, (1.0, 0.0))
+                    c, g, o = self._mc._gpio.set_calibration(ch, gain, offset - float(m))
+                    if c is None:
+                        return {"ok": False, "error": f"Firmware rejected offset for ch {ch}",
+                                "applied": applied}
+                    applied[ch] = o
+                return {"ok": True, "applied": applied}
+
             elif cmd == "reset_calibration":
                 ok = self._mc._gpio.reset_calibration()
                 if not ok:
