@@ -20,6 +20,7 @@ from textual.worker import Worker
 from tui.client import PiClient, ConnectionState
 from tui.data_logger import DataLogger
 from tui.discovery import discover_async, save_host, FLEET_HOSTNAMES, AP_GATEWAY
+from tui.eth_scan import KNOWN_ETH_HOSTS
 from tui.latency_probe import LatencyProbe
 from tui import wifi_scan
 from tui.widgets.circuit_diagram import CircuitDiagram, STATE_DEFS, STATE_PATHS
@@ -349,7 +350,8 @@ class HelpScreen(ModalScreen[None]):
                 "  [bold]l[/]         Start / stop recording\n"
                 "  [bold][ / ][/]     Recording duration -/+\n\n"
                 "[bold white]NETWORK[/]\n"
-                "  [bold]A[/]  Pi to AP mode (pi_SW#)     [bold]C[/]  Pi back to client WiFi\n\n"
+                "  [bold]A[/]  Pi to AP mode (pi_SW#)     [bold]C[/]  Pi back to client WiFi\n"
+                "  [dim]Over Ethernet: A/C just turn the Pi's AP on/off; TUI stays connected[/]\n\n"
                 "[bold white]OTHER[/]\n"
                 "  [bold]r[/]  Reconnect    [bold]?[/]  This help    [bold]q[/]  Quit\n\n"
                 "[dim]Press Escape or ? to close[/]"
@@ -386,14 +388,17 @@ class NetworkModeConfirm(ModalScreen[Optional[str]]):
     #nmc-hint { text-align: center; width: 100%; margin-top: 1; color: $text-muted; }
     """
 
-    def __init__(self, mode: str, message: str):
+    def __init__(self, mode: str, message: str, title: Optional[str] = None):
         super().__init__()
         self._mode = mode
         self._message = message
+        self._title = title
 
     def compose(self) -> ComposeResult:
         with Vertical(id="nmc-box"):
-            title = "Flip to AP Mode" if self._mode == "ap" else "Return to Client Mode"
+            title = self._title or (
+                "Flip to AP Mode" if self._mode == "ap" else "Return to Client Mode"
+            )
             yield Label(f"[bold yellow]{title}[/]", id="nmc-title")
             yield Static(self._message)
             yield Label("[y / Enter] Confirm   [n / Esc] Cancel", id="nmc-hint")
@@ -1681,11 +1686,38 @@ class SwitchingCircuitApp(App):
 
     # -- Network mode (client <-> AP) ---------------------------------------
 
+    def _eth_pi_label(self) -> Optional[str]:
+        """Return e.g. "pi-SW3" if the TUI is talking to a Pi over the shared
+        Ethernet switch, else None. Over Ethernet the AP on wlan0 is an
+        independent extra, so A/C must not retarget or drop the connection."""
+        host = self._client.host if self._client else ""
+        return next((label for label, ip in KNOWN_ETH_HOSTS if ip == host), None)
+
     def action_ap_mode(self) -> None:
         """Ask the Pi to flip to AP mode. Confirms, sends the command, and
         retargets the client at 10.42.0.1 so the TUI reconnects once the
-        MacBook is moved onto the new SSID."""
+        MacBook is moved onto the new SSID. Over Ethernet it only turns the
+        Pi's AP on and stays connected."""
         if not self._client or self._client.connection_state != ConnectionState.CONNECTED:
+            return
+        password = wifi_scan.DEFAULT_AP_PASSWORD
+        label = self._eth_pi_label()
+        if label:
+            ssid = label.replace("-", "_")
+            self.push_screen(
+                NetworkModeConfirm(
+                    mode="ap",
+                    title=f"Turn On AP — {ssid}",
+                    message=(
+                        f"Turn on WiFi AP '[bold]{ssid}[/]' on {label}?\n\n"
+                        f"The Pi keeps its Ethernet link — this TUI stays connected.\n"
+                        f"Devices can then join '[bold]{ssid}[/]' (password: {password})\n"
+                        f"and reach the Pi at [bold]{AP_GATEWAY}:5555[/].\n\n"
+                        f"[dim]AP stays on until C, or until the Pi reboots.[/]\n"
+                    ),
+                ),
+                self._on_network_mode_confirm,
+            )
             return
         self.push_screen(
             NetworkModeConfirm(
@@ -1694,7 +1726,7 @@ class SwitchingCircuitApp(App):
                     "Flip Pi to AP mode?\n\n"
                     f"The Pi will drop its current WiFi and broadcast its own\n"
                     f"AP. Your MacBook will lose connection. To continue:\n\n"
-                    f"   1. Join WiFi '[bold]pi_SW#[/]' (password: switching)\n"
+                    f"   1. Join WiFi '[bold]pi_SW#[/]' (password: {password})\n"
                     f"   2. TUI will reconnect at [bold]{AP_GATEWAY}:5555[/]\n"
                 ),
             ),
@@ -1702,8 +1734,25 @@ class SwitchingCircuitApp(App):
         )
 
     def action_client_mode(self) -> None:
-        """Ask the Pi to drop AP mode and return to client WiFi."""
+        """Ask the Pi to drop AP mode and return to client WiFi. Over
+        Ethernet this just turns the AP off and stays connected."""
         if not self._client or self._client.connection_state != ConnectionState.CONNECTED:
+            return
+        label = self._eth_pi_label()
+        if label:
+            ssid = label.replace("-", "_")
+            self.push_screen(
+                NetworkModeConfirm(
+                    mode="client",
+                    title=f"Turn Off AP — {ssid}",
+                    message=(
+                        f"Turn off WiFi AP '[bold]{ssid}[/]' on {label}?\n\n"
+                        f"Anything joined to {ssid} will drop. The Pi keeps its\n"
+                        f"Ethernet link — this TUI stays connected.\n"
+                    ),
+                ),
+                self._on_network_mode_confirm,
+            )
             return
         self.push_screen(
             NetworkModeConfirm(
@@ -1730,6 +1779,19 @@ class SwitchingCircuitApp(App):
                 self._client.connection_state == ConnectionState.CONNECTED,
                 f"Network flip rejected: {err}",
             )
+            return
+
+        label = self._eth_pi_label()
+        if label:
+            # Ethernet session: eth0 is untouched, so keep the connection.
+            # The server acks before running nmcli, so this confirms the
+            # request was accepted, not that the AP is already up/down.
+            ssid = label.replace("-", "_")
+            if result == "ap":
+                self.notify(f"{label}: bringing up AP '{ssid}' (Ethernet stays connected)",
+                            title="AP on requested")
+            else:
+                self.notify(f"{label}: taking down AP '{ssid}'", title="AP off requested")
             return
 
         conn_bar = self.query_one("#conn-bar", ConnectionBar)
@@ -1792,7 +1854,9 @@ class SwitchingCircuitApp(App):
     def _on_eth_picker_result(self, host: Optional[str]) -> None:
         if not host:
             return
-        self._current_pi_name = host
+        # Show "SW3" like the WiFi path does, rather than the bare IP.
+        label = next((l for l, ip in KNOWN_ETH_HOSTS if ip == host), None)
+        self._current_pi_name = label.replace("pi-", "") if label else host
         self._switch_pi(host)
 
     def _switch_pi(self, new_host: str) -> None:
