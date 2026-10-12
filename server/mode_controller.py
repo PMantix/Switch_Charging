@@ -47,8 +47,13 @@ class ModeController:
         self._auto_follow = AutoFollow(
             get_sensor_data_fn=self._gpio.get_sensor_data,
             set_mode_fn=lambda m: self._set_mode_internal(Mode(m)),
+            is_data_fresh_fn=self._gpio.sensor_data_fresh,
         )
         self._auto_follow.start()
+
+        # After the RP2040 link drops and comes back, the firmware may have
+        # rebooted (FETs off, no sequence) — re-drive the current mode.
+        self._gpio.on_reconnect = self._reapply_mode
 
         # Schedule monitor: passive PLAN-vs-OBSERVED tracker. Always
         # running; updates OBSERVED state from sensor data continuously
@@ -126,20 +131,31 @@ class ModeController:
                 # Seamless: go directly from current FET state to new
                 # state without any all-off intermediate.  Uses live
                 # firmware commands (E, Y) that don't halt the timer
-                # or turn FETs off.
+                # or turn FETs off.  Firmware older than 2026-05-20
+                # rejects E/Y (pi-SW6 found 2026-10-10) — without a
+                # fallback the board kept switching through discharge
+                # while reporting all-on.
+                live = self._gpio.live_commands_supported
                 if mode == Mode.DISCHARGE:
-                    # Live-reprogram cycle to all-on, then set FETs
-                    # immediately.  Timer keeps running but every tick
-                    # applies all-on.  resume() will reprogram later.
-                    self._gpio.program_sequence_live([0xF])
-                    self._gpio.all_on_no_halt()
+                    if live:
+                        # Live-reprogram cycle to all-on, then set FETs
+                        # immediately.  Timer keeps running but every tick
+                        # applies all-on.  resume() will reprogram later.
+                        self._gpio.program_sequence_live([0xF])
+                        self._gpio.all_on_no_halt()
+                    else:
+                        # S halts the timer and drives all-on in the same
+                        # firmware call — still no open circuit.
+                        self._gpio.all_on()
                     self._engine.pause_silent()
-                elif mode == Mode.CHARGE:
-                    self._engine.set_pulse_mode(False)
-                    self._engine.resume_live()
-                elif mode == Mode.PULSE_CHARGE:
-                    self._engine.set_pulse_mode(True)
-                    self._engine.resume_live()
+                elif mode in (Mode.CHARGE, Mode.PULSE_CHARGE):
+                    self._engine.set_pulse_mode(mode == Mode.PULSE_CHARGE)
+                    if live:
+                        self._engine.resume_live()
+                    else:
+                        # C + F + G: correct sequence, but C opens all FETs
+                        # for the ~10-50 ms until G lands.
+                        self._engine.resume()
             else:
                 self._engine.pause()
                 self._gpio.all_off()
@@ -160,6 +176,28 @@ class ModeController:
 
             self._mode = mode
             return self._mode
+
+    def _reapply_mode(self):
+        """Re-drive the FETs for the current mode after an RP2040 reconnect.
+
+        If the firmware kept running these are idempotent; if it rebooted
+        the FETs are already off. DISCHARGE uses S (works on every
+        firmware, no gap); switching modes use the live path when the
+        firmware supports it."""
+        with self._lock:
+            mode = self._mode
+            if mode == Mode.DISCHARGE:
+                self._gpio.all_on()
+            elif mode in (Mode.CHARGE, Mode.PULSE_CHARGE):
+                if self._gpio.live_commands_supported:
+                    self._engine.resume_live()
+                else:
+                    self._engine.resume()
+            elif mode == Mode.IDLE:
+                self._gpio.all_off()
+            elif mode == Mode.DEBUG:
+                self._gpio.apply_state(tuple(self._gpio.get_fet_states()))
+        log.warning("Re-applied mode %s after RP2040 reconnect", mode.value)
 
     # -- schedule management -------------------------------------------------
 
@@ -262,6 +300,9 @@ class ModeController:
             "frequency": engine_state["frequency"],
             "fet_states": engine_state["fet_states"],
             "sensors": self._gpio.get_sensor_data(),
+            # RP2040 link health — when "stale" is true the sensors above
+            # are the last values received, not live readings.
+            "link": self._gpio.link_status(),
         }
         if mode == Mode.DEBUG:
             status["debug_step"] = debug_step

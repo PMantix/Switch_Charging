@@ -574,6 +574,7 @@ class SwitchingCircuitApp(App):
         self._showing_auto_panel = False  # right column: status vs auto panel
         self._prev_mode = "idle"         # track mode changes for panel auto-switch
         self._latest_auto_follow: dict = {}  # mirror of last auto_follow status
+        self._link_stale = False  # Pi reports its RP2040 link down / sensor data frozen
         self._probe = LatencyProbe()
         self._offset_worker_started = False
         self._last_probe_display_ns = 0
@@ -917,6 +918,7 @@ class SwitchingCircuitApp(App):
             if af:
                 self._latest_auto_follow = af
                 rpanel.auto_follow = af
+            self._update_link_ui(data.get("link"))
             monitor_data = data.get("schedule_monitor", {}) or {}
             auto_panel.monitor_data = monitor_data
 
@@ -1035,6 +1037,8 @@ class SwitchingCircuitApp(App):
         rpanel = self.query_one("#right-panel", RightPanel)
 
         name = self._current_pi_name
+        # Re-evaluate the RP2040 link from the next state push.
+        self._link_stale = False
         if state == ConnectionState.CONNECTED:
             conn_bar.connected = True
             conn_bar.conn_label = f"Connected — {name}" if name else "Connected"
@@ -1051,6 +1055,31 @@ class SwitchingCircuitApp(App):
             conn_bar.conn_label = "Disconnected"
             rpanel.connected = False
             rpanel.conn_status = "Disconnected"
+
+    def _update_link_ui(self, link: Optional[dict]) -> None:
+        """Flag a Pi whose RP2040 link is down: the TCP connection is fine
+        but the sensor values it serves are frozen and it can't switch.
+        Servers without link reporting send no "link" key — treated as OK.
+        Only acts on transitions so it doesn't fight the REC countdown."""
+        stale = bool(link and link.get("stale") and link.get("state") != "mock")
+        if stale == self._link_stale:
+            return
+        self._link_stale = stale
+        if not stale:
+            self._update_connection_ui(ConnectionState.CONNECTED)
+            self.notify("RP2040 link restored — sensor data live",
+                        title="RP2040 link")
+            return
+        name = self._current_pi_name
+        label = f"{name} — RP2040 LINK DOWN" if name else "RP2040 LINK DOWN"
+        self.query_one("#conn-bar", ConnectionBar).conn_label = label
+        self.query_one("#right-panel", RightPanel).conn_status = label
+        age = link.get("sensor_age_s")
+        detail = (f"Sensor data frozen ({'never received' if age is None else f'{age:.0f}s old'}); "
+                  "switching and logging are not working.")
+        if link.get("last_error"):
+            detail += f"\nLast error: {link['last_error']}"
+        self.notify(detail, title="RP2040 link down", severity="error", timeout=15)
 
     def _update_status_connection(self, connected: bool, label: str) -> None:
         rpanel = self.query_one("#right-panel", RightPanel)

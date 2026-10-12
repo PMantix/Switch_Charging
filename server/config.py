@@ -65,6 +65,15 @@ INA226_ADDR_N2 = 0x45      # Low-side right  (A1=VS,  A0=VS)
 RP2040_SERIAL_PORT = "/dev/ttyACM0"   # default on Pi
 RP2040_SERIAL_BAUD = 115200
 
+# Link supervision. A single serial read error used to kill the reader
+# thread for good (2026-10-10: pi-SW2 went deaf 24 s after boot and kept
+# serving frozen sensor values as if live). The reader now reopens the
+# port on any error, and also forces a reopen when the D-line stream goes
+# silent while streaming is expected.
+RP2040_RECONNECT_INTERVAL_S = 2.0   # s between reopen attempts while down
+SENSOR_STALE_MIN_S = 2.0            # s without a D line before data counts as stale
+SENSOR_WATCHDOG_S = 10.0            # s without a D line before forcing a reopen
+
 # ---------------------------------------------------------------------------
 # H-bridge state definitions
 #   Each tuple: (P1, P2, N1, N2) — True = on, False = off

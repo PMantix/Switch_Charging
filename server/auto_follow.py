@@ -46,6 +46,7 @@ class AutoFollow:
         i_enter_a: float = AUTO_FOLLOW_I_ENTER_A,
         i_exit_a: float = AUTO_FOLLOW_I_EXIT_A,
         loop_hz: float = AUTO_FOLLOW_LOOP_HZ,
+        is_data_fresh_fn: Optional[Callable[[], bool]] = None,
     ):
         if i_enter_a <= i_exit_a:
             raise ValueError(
@@ -53,6 +54,10 @@ class AutoFollow:
             )
         self._get_sensor_data = get_sensor_data_fn
         self._set_mode = set_mode_fn
+        # When provided and returning False, ticks are skipped so a dead
+        # sensor link can't drive mode changes off frozen values — the
+        # current mode is held until live data returns.
+        self._is_data_fresh = is_data_fresh_fn
         self._detector = CyclerDetector()  # used only for its KCL avg_current
 
         self._lock = threading.Lock()
@@ -197,6 +202,8 @@ class AutoFollow:
 
     def _tick(self):
         from time import monotonic
+        if self._is_data_fresh is not None and not self._is_data_fresh():
+            return
         sensor_data = self._get_sensor_data()
         if not sensor_data:
             return

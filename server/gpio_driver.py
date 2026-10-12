@@ -15,6 +15,7 @@ import time
 
 from server.config import (
     RP2040_SERIAL_PORT, RP2040_SERIAL_BAUD,
+    RP2040_RECONNECT_INTERVAL_S, SENSOR_STALE_MIN_S, SENSOR_WATCHDOG_S,
     STATE_DEFS,
 )
 
@@ -71,75 +72,250 @@ class GPIODriver:
 
         self._stop_event = threading.Event()
 
-        if _HAS_SERIAL:
-            ports_to_try = [port] + [f"/dev/ttyACM{i}" for i in range(4) if f"/dev/ttyACM{i}" != port]
-            for try_port in ports_to_try:
-                try:
-                    self._ser = serial.Serial(try_port, baud, timeout=0.5)
-                    self._wait_for_ready()
-                    self._mock = False
-                    self._port_name = try_port
-                    log.info("GPIODriver connected to RP2040 on %s @ %d", try_port, baud)
-                    break
-                except (serial.SerialException, OSError) as e:
-                    log.debug("Could not open %s: %s", try_port, e)
-                    self._ser = None
-                    continue
-            if self._mock:
-                log.warning("No RP2040 found on any serial port — using mock driver")
-        else:
-            log.info("GPIODriver running in mock mode (no pyserial)")
+        # Link supervision (see link_status()). _link_up is True while a
+        # port is open and the reader is consuming it; _last_frame_mono is
+        # the Pi-monotonic receive time of the newest D line.
+        self._baud = baud
+        self._link_up = False
+        self._link_since = None
+        self._last_frame_mono = None
+        self._last_error = None
+        self._reconnect_count = 0
+        # Last values the host asked for, so they can be re-sent after a
+        # reconnect (the firmware keeps them in RAM only).
+        self._requested_hz = None
+        self._requested_avg = None
+        self._requested_bus_every = None
+        # Optional callback fired (in a helper thread) after a reconnect
+        # has restored the stream settings. ModeController uses it to
+        # re-apply the current mode's FET state.
+        self.on_reconnect = None  # type: ignore[assignment]
+        # Whether the firmware knows the live (no-halt) commands E / Y
+        # (added 2026-05-20). None until probed; boards flashed earlier
+        # reject them, so callers must fall back (see live_commands_supported).
+        self._live_cmds = None
 
-        # Start reader thread (reads all incoming lines from RP2040)
-        if not self._mock:
+        if _HAS_SERIAL:
+            if not self._open_port(port):
+                log.warning("No RP2040 found on any serial port — using mock "
+                            "driver until one appears (retrying every %.0fs)",
+                            RP2040_RECONNECT_INTERVAL_S)
+            # The reader thread runs even without a port: it owns
+            # (re)connection as well as line routing.
             self._reader_thread = threading.Thread(
                 target=self._reader_loop, name="RP2040-Reader", daemon=True,
             )
             self._reader_thread.start()
+            if self._link_up:
+                self.probe_live_commands()
+        else:
+            log.info("GPIODriver running in mock mode (no pyserial)")
 
         self.all_off()
 
+    def _open_port(self, preferred):
+        """Open the RP2040's serial port, trying `preferred` first and then
+        /dev/ttyACM0-3 (it can re-enumerate under a new name). Returns True
+        on success. Must only be called before the reader thread starts or
+        from the reader thread itself — it reads the port directly."""
+        ports_to_try = [preferred] + [f"/dev/ttyACM{i}" for i in range(4)
+                                      if f"/dev/ttyACM{i}" != preferred]
+        for try_port in ports_to_try:
+            try:
+                ser = serial.Serial(try_port, self._baud, timeout=0.5)
+            except (serial.SerialException, OSError) as e:
+                log.debug("Could not open %s: %s", try_port, e)
+                continue
+            with self._lock:
+                self._ser = ser
+                self._port_name = try_port
+                self._mock = False
+            try:
+                self._wait_for_ready()
+            except (serial.SerialException, OSError) as e:
+                log.debug("Lost %s while waiting for READY: %s", try_port, e)
+                with self._lock:
+                    self._ser = None
+                try:
+                    ser.close()
+                except OSError:
+                    pass
+                continue
+            self._link_up = True
+            self._link_since = time.monotonic()
+            log.info("GPIODriver connected to RP2040 on %s @ %d", try_port, self._baud)
+            return True
+        return False
+
     def _wait_for_ready(self, timeout=5.0):
+        """Wait for the firmware's boot banner. A D line also counts: on a
+        reconnect the firmware is usually still running and streaming, and
+        will never print READY again."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self._ser and self._ser.in_waiting:
                 line = self._ser.readline().decode("utf-8", errors="replace").strip()
                 log.debug("RP2040 boot: %s", line)
-                if "OK READY" in line:
+                if "OK READY" in line or line.startswith("D "):
                     return
             time.sleep(0.05)
         log.warning("RP2040 did not send READY within %.1fs — continuing anyway", timeout)
+
+    # -- Link supervision ----------------------------------------------------
+
+    def _drop_link(self, reason):
+        """Close the port after an error; the reader loop reopens it."""
+        log.error("RP2040 link lost: %s — reconnecting", reason)
+        with self._lock:
+            ser, self._ser = self._ser, None
+            self._link_up = False
+            self._last_error = reason
+        if ser is not None:
+            try:
+                ser.close()
+            except OSError:
+                pass
+
+    def _reconnect(self):
+        """One reopen attempt (reader thread). On success, restore the
+        stream settings and mode from a helper thread — they go through
+        _send(), whose replies only arrive via this reader thread."""
+        if not self._open_port(self._port_name):
+            return False
+        self._reconnect_count += 1
+        log.warning("RP2040 link restored on %s (reconnect #%d)",
+                    self._port_name, self._reconnect_count)
+        threading.Thread(target=self._restore_after_reconnect,
+                         name="RP2040-Restore", daemon=True).start()
+        return True
+
+    def _restore_after_reconnect(self):
+        try:
+            # If the RP2040 rebooted, AVG / bus decimation / stream rate
+            # are back at firmware defaults (RAM only). Re-sending them is
+            # harmless if it didn't.
+            if self._requested_avg is not None:
+                self.set_ina226_avg(self._requested_avg)
+            if self._requested_bus_every is not None:
+                self.set_bus_every(self._requested_bus_every)
+            if self._requested_hz is not None:
+                self.set_sensor_rate(self._requested_hz)
+            self.probe_live_commands()  # the board may have been reflashed
+            self.sync_firmware_clock()
+            cb = self.on_reconnect
+            if cb is not None:
+                cb()
+        except Exception:
+            log.exception("Restore after RP2040 reconnect failed")
+
+    def _check_stream_watchdog(self):
+        """Force a reopen when streaming is expected but no D line has
+        arrived for SENSOR_WATCHDOG_S (the port can stay open while the
+        stream is dead)."""
+        if not self._link_up or self._sensor_hz <= 0:
+            return
+        with self._sensor_lock:
+            last = self._last_frame_mono
+        ref = max(last or 0.0, self._link_since or 0.0)
+        silent_s = time.monotonic() - ref
+        if silent_s > SENSOR_WATCHDOG_S:
+            self._drop_link(f"no sensor data for {silent_s:.0f}s")
+
+    def link_status(self):
+        """Health of the RP2040 link and sensor stream, for get_status.
+
+        state: "connected" | "disconnected" | "mock" (no pyserial)
+        stale: True when the sensor values in the status are not live —
+               link down, nothing received yet, or no D line within
+               max(SENSOR_STALE_MIN_S, 5 stream periods).
+        """
+        with self._sensor_lock:
+            last = self._last_frame_mono
+        age = None if last is None else time.monotonic() - last
+        hz = self._sensor_hz
+        stale_after = max(SENSOR_STALE_MIN_S, 5.0 / hz) if hz > 0 else SENSOR_STALE_MIN_S
+        if not _HAS_SERIAL:
+            state = "mock"
+        else:
+            state = "connected" if self._link_up else "disconnected"
+        return {
+            "state": state,
+            "port": self._port_name,
+            "sensor_age_s": None if age is None else round(age, 2),
+            "stale": (not self._link_up) or age is None or age > stale_after,
+            "reconnects": self._reconnect_count,
+            "last_error": self._last_error,
+            "live_cmds": self._live_cmds,
+        }
+
+    def probe_live_commands(self):
+        """Check whether the firmware supports the live commands E / Y.
+
+        A bare "Y" is safe on every firmware: current builds reject it on
+        argument count without touching the FETs; builds older than
+        2026-05-20 (C and MicroPython alike) answer "unknown command".
+        No reply leaves the answer unknown."""
+        resp = self._send("Y")
+        if resp is not None:
+            self._note_live_reply(resp)
+            if self._live_cmds:
+                log.info("RP2040 firmware supports live commands E/Y")
+        return self._live_cmds
+
+    def _note_live_reply(self, resp):
+        supported = "unknown command" not in resp
+        if not supported and self._live_cmds is not False:
+            log.warning("RP2040 firmware predates live commands E/Y — mode "
+                        "transitions use halt-and-reprogram fallbacks; "
+                        "reflash firmware-c to restore seamless switching")
+        self._live_cmds = supported
+
+    @property
+    def live_commands_supported(self):
+        """True only when the firmware is known to accept E / Y."""
+        return self._live_cmds is True
+
+    def sensor_data_fresh(self):
+        """True when get_sensor_data() is live and safe to act on."""
+        return not self.link_status()["stale"]
 
     # -- Reader thread -------------------------------------------------------
 
     def _reader_loop(self):
         """Continuously read lines from RP2040. Route stream data to cache,
-        command responses to the response queue."""
+        command responses to the response queue. Also owns the link: any
+        serial error closes the port and the loop keeps reopening it every
+        RP2040_RECONNECT_INTERVAL_S until it comes back."""
         while not self._stop_event.is_set():
+            ser = self._ser
+            if ser is None or not ser.is_open:
+                if not self._reconnect():
+                    self._stop_event.wait(RP2040_RECONNECT_INTERVAL_S)
+                continue
             try:
-                if not self._ser or not self._ser.is_open:
-                    break
-                raw = self._ser.readline()
-                if not raw:
-                    continue
-                line = raw.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-
-                if line.startswith("D "):
-                    self._handle_stream_line(line)
-                elif line.startswith("BR ") or line.startswith("OK ") or line.startswith("ERR"):
-                    self._response_q.put(line)
-                elif "BURST_DONE" in line:
-                    self._response_q.put(line)
-                    log.info("RP2040: %s", line)
-                else:
-                    # Boot messages, info, etc
-                    log.debug("RP2040: %s", line)
+                raw = ser.readline()
             except (serial.SerialException, OSError) as e:
-                if not self._stop_event.is_set():
-                    log.error("Reader error: %s", e)
-                break
+                if self._stop_event.is_set():
+                    break
+                self._drop_link(f"serial read error: {e}")
+                continue
+            self._check_stream_watchdog()
+            if not raw:
+                continue
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+
+            if line.startswith("D "):
+                self._handle_stream_line(line)
+            elif line.startswith("BR ") or line.startswith("OK ") or line.startswith("ERR"):
+                self._response_q.put(line)
+            elif "BURST_DONE" in line:
+                self._response_q.put(line)
+                log.info("RP2040: %s", line)
+            else:
+                # Boot messages, info, etc
+                log.debug("RP2040: %s", line)
 
     def _handle_stream_line(self, line):
         """Parse a D line: D <t_us> <seq> <P1v> <P1i> <P2v> <P2i> <N1v> <N1i> <N2v> <N2i>
@@ -182,6 +358,7 @@ class GPIODriver:
                 sample_pi_s = time.monotonic()
             with self._sensor_lock:
                 self._sensor_data = data
+                self._last_frame_mono = time.monotonic()
             self._sensor_new.set()
             # Fire the optional per-frame callback (used by command_server
             # for Pi-side recording at the sensor rate). Kept tolerant of
@@ -256,6 +433,7 @@ class GPIODriver:
         whatever _max_stream_hz() returns for the current AVG + bus decimation
         profile; the OK T reply echoes the effective rate."""
         hz = max(0.0, float(hz))
+        self._requested_hz = hz
         resp = self._send(f"T {hz:.1f}")
         if resp and resp.startswith("OK T"):
             try:
@@ -274,6 +452,7 @@ class GPIODriver:
         """Set INA226 averaging count. Valid: 1/4/16/64/128/256/512/1024.
         Returns (actual_avg, max_hz) — firmware echoes the new cap so the
         caller can re-clamp the stream rate if needed."""
+        self._requested_avg = int(avg)
         resp = self._send(f"A {int(avg)}")
         if resp and resp.startswith("OK A"):
             parts = resp.split()
@@ -310,6 +489,7 @@ class GPIODriver:
     def set_bus_every(self, every):
         """Set bus-voltage decimation. 0 = never read bus, 1 = every sample,
         N = every Nth shunt sweep. Returns (actual_every, max_hz)."""
+        self._requested_bus_every = int(every)
         resp = self._send(f"V {int(every)}")
         if resp and resp.startswith("OK V"):
             parts = resp.split()
@@ -513,6 +693,7 @@ class GPIODriver:
             log.warning("RP2040 E command timed out — no response; sequence may not be programmed on hardware")
         elif resp and not resp.startswith("OK"):
             log.warning("RP2040 E error: %s", resp)
+            self._note_live_reply(resp)
 
     def all_on_no_halt(self):
         """Set all FETs on without halting the switching timer."""
@@ -522,6 +703,7 @@ class GPIODriver:
             log.warning("RP2040 Y command timed out — no response; FET state may not match hardware")
         elif resp and not resp.startswith("OK"):
             log.warning("RP2040 Y error: %s", resp)
+            self._note_live_reply(resp)
 
     def set_step_period_us(self, period_us):
         """Set the per-step period in microseconds. If switching is running,
