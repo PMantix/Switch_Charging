@@ -3,7 +3,9 @@ Switching Circuit V2 - Schedule Preview & Edit Screen.
 
 Two-stage flow:
   1. Pick a schedule file (or enter a path)
-  2. Preview all steps with parameters, optionally adjust, then Start or Cancel
+  2. Preview all steps with parameters, optionally adjust, then Load into
+     the schedule monitor or Cancel. Loading does not change the circuit
+     mode; the monitor passively tracks the plan against observed state.
 """
 
 from __future__ import annotations
@@ -102,7 +104,7 @@ class SchedulePreviewScreen(ModalScreen[Optional[dict]]):
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
-        Binding("enter", "start", "Start Auto"),
+        Binding("enter", "start", "Load to Monitor"),
     ]
 
     DEFAULT_CSS = """
@@ -156,7 +158,7 @@ class SchedulePreviewScreen(ModalScreen[Optional[dict]]):
             yield Static(self._build_step_table(steps), id="step-table")
 
             # Editable settings
-            yield Label("[bold white]Settings[/] (edit below, or press Enter to start as-is)",
+            yield Label("[bold white]Settings[/] (edit below, or press Enter to load as-is)",
                         id="preview-settings")
             yield Label("Repeat cycles:", classes="field-label")
             yield Input(value=str(repeat), id="input-repeat",
@@ -174,7 +176,7 @@ class SchedulePreviewScreen(ModalScreen[Optional[dict]]):
 
             # Buttons
             with Horizontal(id="btn-row"):
-                yield Button("Start Auto", variant="success", id="btn-start")
+                yield Button("Load to Monitor", variant="success", id="btn-start")
                 yield Button("Cancel", variant="error", id="btn-cancel")
 
     def _build_step_table(self, steps: list[dict]) -> str:

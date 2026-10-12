@@ -33,13 +33,19 @@ class ConnectionBar(Widget):
     host: reactive[str] = reactive("")
     latency_ms: reactive[float] = reactive(0.0)
     conn_label: reactive[str] = reactive("Disconnected")
+    # Pi reachable but its RP2040 link is down (sensor data frozen).
+    link_down: reactive[bool] = reactive(False)
     probe_text: reactive[str] = reactive("")
     _auto_data: dict = {}
 
     def render(self) -> Text:
         t = Text()
 
-        if self.connected:
+        if self.connected and self.link_down:
+            t.append(" \u26a0 ", style="bold yellow")
+            t.append("RP2040 LINK DOWN — sensor data frozen", style="bold yellow")
+            t.append(f"  {self.host}", style="bold white")
+        elif self.connected:
             t.append(" \u25cf ", style="bold green")
             t.append("Connected", style="green")
             t.append(f"  {self.host}", style="bold white")
@@ -102,6 +108,9 @@ class ConnectionBar(Widget):
         self.refresh()
 
     def watch_conn_label(self, _: str) -> None:
+        self.refresh()
+
+    def watch_link_down(self, _: bool) -> None:
         self.refresh()
 
     def watch_probe_text(self, _: str) -> None:

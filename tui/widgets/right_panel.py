@@ -24,7 +24,6 @@ MODE_STYLES = {
     "discharge": "bold yellow",
     "pulse_charge": "bold magenta",
     "debug": "bold cyan",
-    "auto": "bold blue",
 }
 
 MODE_LABELS = {
@@ -33,7 +32,6 @@ MODE_LABELS = {
     "discharge": "DISCHARGE",
     "pulse_charge": "PULSE",
     "debug": "DEBUG",
-    "auto": "AUTO",
 }
 
 MODE_KEYS = {
@@ -42,7 +40,6 @@ MODE_KEYS = {
     "discharge": "x",
     "pulse_charge": "p",
     "debug": "g",
-    "auto": "a",
 }
 
 
@@ -63,6 +60,8 @@ class RightPanel(Widget):
     step: reactive[int] = reactive(0)
     connected: reactive[bool] = reactive(False)
     conn_status: reactive[str] = reactive("Disconnected")
+    # Pi reachable but its RP2040 link is down (sensor data frozen).
+    link_down: reactive[bool] = reactive(False)
     current_path: reactive[str] = reactive("")
     auto_follow: reactive[dict] = reactive({})
 
@@ -85,7 +84,8 @@ class RightPanel(Widget):
             round(af.get("avg_current_a", 0.0), 4),
         )
         key = (self.mode, self.sequence, self.frequency, self.step,
-               self.connected, self.conn_status, self.current_path, af_key)
+               self.connected, self.conn_status, self.link_down,
+               self.current_path, af_key)
         if key == self._text_cache_key and self._text_cache is not None:
             return self._text_cache
         t = self._render_impl()
@@ -96,7 +96,7 @@ class RightPanel(Widget):
     def _render_impl(self) -> Text:
         t = Text()
         t.append(" Tab", style="bold white on dark_blue")
-        t.append(" \u2192 Auto panel\n\n", style="dim")
+        t.append(" \u2192 Schedule monitor\n\n", style="dim")
 
         # -- Status --
         t.append(" STATUS\n", style="bold cyan underline")
@@ -125,7 +125,10 @@ class RightPanel(Widget):
         t.append("\n")
 
         # Connection
-        if self.connected:
+        if self.connected and self.link_down:
+            t.append(" \u26a0 ", style="bold yellow")
+            t.append(self.conn_status, style="bold yellow")
+        elif self.connected:
             t.append(" \u25cf ", style="bold green")
             t.append(self.conn_status, style="green")
         else:
@@ -137,7 +140,7 @@ class RightPanel(Widget):
         t.append(" MODE", style="bold cyan underline")
         t.append("\n\n")
 
-        for m in ["idle", "charge", "discharge", "pulse_charge", "debug", "auto"]:
+        for m in ["idle", "charge", "discharge", "pulse_charge", "debug"]:
             sel = (m == self.mode)
             radio = "\u25cf" if sel else "\u25cb"
             style = MODE_STYLES.get(m, "white")

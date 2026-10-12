@@ -28,6 +28,7 @@ class LeftPanel(Widget):
                 (" w/s ", "+/- 0.1 Hz"),
                 (" e/d ", "+/- 1.0 Hz"),
                 (" W/S ", "+/- 10 Hz"),
+                (" =/- ", "+/- 0.1 Hz"),
             ]),
             ("SENSORS", [
                 (" / * ", "Rate -/+"),
@@ -49,16 +50,28 @@ class LeftPanel(Widget):
                 (" ;/' ", "I_exit -/+0.5mA"),
                 (" </> ", "CC setpoint"),
             ]),
+            ("SCHEDULE MONITOR", [
+                ("  a  ", "Load schedule"),
+                ("  M  ", "Restart clock"),
+            ]),
             ("CALIBRATE", [
                 ("  B  ", "INA226 Cal Wizard"),
             ]),
             ("NETWORK", [
-                ("  P  ", "Switch Pi"),
+                ("  P  ", "Switch Pi (WiFi)"),
+                ("  E  ", "Switch Pi (Eth)"),
                 ("  r  ", "Reconnect"),
+                (" A/C ", "Pi AP on/off"),
+            ]),
+            ("SCROLL", [
+                ("PgUp/Dn", "Center column"),
+                ("S+PgUp/Dn", "Right column"),
+                ("S+\u2190/\u2192", "Sideways"),
             ]),
             ("OTHER", [
-                (" Tab ", "Toggle panel"),
-                ("  ?  ", "Help"),
+                (" Tab ", "Status/Monitor"),
+                ("  D  ", "Latency probe"),
+                ("  ?  ", "Full help"),
                 ("  q  ", "Quit"),
             ]),
         ]

@@ -1,8 +1,9 @@
 """
 Switching Circuit V2 - Main TUI Application.
 
-Two-column layout with the circuit diagram on the left and control
-panels on the right. Connects to the Raspberry Pi server over TCP
+Three-column layout: key reference on the left, circuit diagram and
+sensor plots in the center, and the Status / Schedule monitor panel
+(Tab) on the right. Connects to the Raspberry Pi server over TCP
 and updates in real-time via a state subscription stream.
 """
 
@@ -109,7 +110,7 @@ class ConnectDialog(ModalScreen[str]):
             yield Label("", id="connect-status")
             yield Input(placeholder="IP address or Enter to auto-discover", id="ip-input")
             yield Label(
-                "↑↓ select  1-8 jump  J join AP  r rescan  Enter connect  Esc cancel",
+                "↑↓ select  1-8 jump  j join AP  r rescan  Enter connect  Esc cancel",
                 id="connect-hint",
             )
 
@@ -304,6 +305,10 @@ class HelpScreen(ModalScreen[None]):
     BINDINGS = [
         Binding("escape", "close", "Close"),
         Binding("question_mark", "close", "Close"),
+        Binding("up", "scroll('up')", show=False),
+        Binding("down", "scroll('down')", show=False),
+        Binding("pageup", "scroll('pageup')", show=False),
+        Binding("pagedown", "scroll('pagedown')", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -311,7 +316,7 @@ class HelpScreen(ModalScreen[None]):
         align: center middle;
     }
     #help-box {
-        width: 58;
+        width: 66;
         height: auto;
         max-height: 90%;
         border: thick $accent;
@@ -327,14 +332,11 @@ class HelpScreen(ModalScreen[None]):
                 "[bold cyan]Switching Circuit V2 - Key Bindings[/]\n\n"
                 "[bold white]CONTROL[/]\n"
                 "  [bold]Space[/]     Start/Stop (idle <-> charge)\n"
-                "  [bold]m[/]         Cycle mode\n\n"
+                "  [bold]m[/]         Cycle mode (idle > charge > discharge\n"
+                "            > pulse > debug)\n\n"
                 "[bold white]MODE[/]\n"
                 "  [bold]c[/]  Charge    [bold]i[/]  Idle      [bold]x[/]  Discharge\n"
-                "  [bold]p[/]  Pulse     [bold]g[/]  Debug     [bold]a[/]  Auto\n\n"
-                "[bold white]AUTO MODE[/]  [dim](press [bold]a[/] to load schedule)[/]\n"
-                "  [bold]n[/]         Skip to next step\n"
-                "  [bold]Space[/]     Pause / resume auto\n"
-                "  [bold]i[/]         Stop auto, return to idle\n\n"
+                "  [bold]p[/]  Pulse     [bold]g[/]  Debug\n\n"
                 "[bold white]FREQUENCY[/]\n"
                 "  [bold]= / -[/]     +/- 0.1 Hz    [bold]w / s[/]  +/- 0.1 Hz\n"
                 "  [bold]e / d[/]     +/- 1.0 Hz    [bold]W / S[/]  +/- 10 Hz\n\n"
@@ -345,20 +347,57 @@ class HelpScreen(ModalScreen[None]):
                 "  [bold]* / /[/]     Sensor rate +/- (0.5-1000 Hz)\n"
                 "  [bold]j[/]         Cycle INA226 averaging (1/4/16/64)\n"
                 "  [bold]k[/]         Cycle bus-voltage decimation (1/2/3/5/10/off)\n"
-                "  [bold]v[/]         Cycle plot mode (line/dot/bar)\n\n"
+                "  [bold]v[/]         Cycle plot mode (line/dot/bar)\n"
+                "  [bold]y[/]         Cycle window: lock plot to N switching\n"
+                "            cycles (off/1/2/5/10)\n"
+                "  [bold]R[/]         Plot range auto / fixed (2-4.5V, ±500mA)\n\n"
                 "[bold white]RECORDING[/]\n"
                 "  [bold]l[/]         Start / stop recording\n"
-                "  [bold][ / ][/]     Recording duration -/+\n\n"
+                "  [bold][ / ][/]     Recording duration -/+\n"
+                "  [bold]O[/]         Offload recordings from Pi to Mac\n\n"
+                "[bold white]AUTO-FOLLOW[/]\n"
+                "  [bold]F[/]         Toggle auto-follow on/off\n"
+                "  [bold]T[/]         Cycle target (charge / pulse)\n"
+                "  [bold], / .[/]     I_enter -/+ 1 mA\n"
+                "  [bold]; / '[/]     I_exit -/+ 0.5 mA\n"
+                "  [bold]< / >[/]     CC setpoint -/+\n\n"
+                "[bold white]SCHEDULE MONITOR[/]  [dim](Tab to view)[/]\n"
+                "  [bold]a[/]         Load a schedule to monitor\n"
+                "            [dim](does not change the circuit mode)[/]\n"
+                "  [bold]M[/]         Restart monitor clock (step 1, cycle 1)\n\n"
                 "[bold white]NETWORK[/]\n"
+                "  [bold]P[/]         Switch Pi (WiFi picker)\n"
+                "  [bold]E[/]         Switch Pi (Ethernet picker)\n"
+                "  [bold]r[/]         Reconnect (opens Connect dialog)\n"
                 "  [bold]A[/]  Pi to AP mode (pi_SW#)     [bold]C[/]  Pi back to client WiFi\n"
                 "  [dim]Over Ethernet: A/C just turn the Pi's AP on/off; TUI stays connected[/]\n\n"
+                "[bold white]SCROLLING[/]  [dim](small windows)[/]\n"
+                "  [bold]Wheel[/]     Scroll the column under the pointer\n"
+                "  [bold]Shift+Wheel[/]  Scroll sideways\n"
+                "  [bold]PgUp/PgDn[/]       Center column (plots)\n"
+                "  [bold]Shift+PgUp/PgDn[/] Right column\n"
+                "  [bold]Shift+← / →[/]     Scroll sideways\n"
+                "  [dim]Mac laptop: PgUp/PgDn = Fn+↑ / Fn+↓[/]\n\n"
                 "[bold white]OTHER[/]\n"
-                "  [bold]r[/]  Reconnect    [bold]?[/]  This help    [bold]q[/]  Quit\n\n"
-                "[dim]Press Escape or ? to close[/]"
+                "  [bold]Tab[/]       Right column: Status <-> Schedule monitor\n"
+                "  [bold]B[/]         INA226 calibration wizard\n"
+                "  [bold]D[/]         Latency probe on/off\n"
+                "  [bold]?[/]         This help    [bold]q[/]  Quit\n\n"
+                "[bold white]STATUS[/]\n"
+                "  [bold yellow]RP2040 LINK DOWN[/]: the Pi is reachable but lost its\n"
+                "  serial link to the RP2040, so sensor data is frozen and\n"
+                "  switching won't work. The Pi reconnects automatically\n"
+                "  and the TUI shows a 'restored' notice when it's back.\n\n"
+                "[dim]Scroll with ↑↓ / PgUp / PgDn. Escape or ? to close[/]"
             )
 
     def action_close(self) -> None:
         self.dismiss(None)
+
+    def action_scroll(self, direction: str) -> None:
+        box = self.query_one("#help-box", Vertical)
+        {"up": box.scroll_up, "down": box.scroll_down,
+         "pageup": box.scroll_page_up, "pagedown": box.scroll_page_down}[direction]()
 
 
 # ---------------------------------------------------------------------------
@@ -1044,6 +1083,8 @@ class SwitchingCircuitApp(App):
         name = self._current_pi_name
         # Re-evaluate the RP2040 link from the next state push.
         self._link_stale = False
+        conn_bar.link_down = False
+        rpanel.link_down = False
         if state == ConnectionState.CONNECTED:
             conn_bar.connected = True
             conn_bar.conn_label = f"Connected — {name}" if name else "Connected"
@@ -1077,8 +1118,12 @@ class SwitchingCircuitApp(App):
             return
         name = self._current_pi_name
         label = f"{name} — RP2040 LINK DOWN" if name else "RP2040 LINK DOWN"
-        self.query_one("#conn-bar", ConnectionBar).conn_label = label
-        self.query_one("#right-panel", RightPanel).conn_status = label
+        conn_bar = self.query_one("#conn-bar", ConnectionBar)
+        rpanel = self.query_one("#right-panel", RightPanel)
+        conn_bar.conn_label = label
+        conn_bar.link_down = True
+        rpanel.conn_status = label
+        rpanel.link_down = True
         age = link.get("sensor_age_s")
         detail = (f"Sensor data frozen ({'never received' if age is None else f'{age:.0f}s old'}); "
                   "switching and logging are not working.")
@@ -1181,7 +1226,7 @@ class SwitchingCircuitApp(App):
             self.notify(f"Failed to load schedule: {err}", title="Error", severity="error")
 
     def action_toggle_right_panel(self) -> None:
-        """Toggle between Status and Auto panel in the right column."""
+        """Toggle between Status and Schedule monitor in the right column."""
         rpanel = self.query_one("#right-panel", RightPanel)
         auto_panel = self.query_one("#auto-panel", AutoPanel)
 

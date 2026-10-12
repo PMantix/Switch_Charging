@@ -2,9 +2,13 @@
 Switching Circuit V2 - TUI Entry Point.
 
 Usage:
-    python -m tui                          # prompts for IP
+    python -m tui                          # auto-discover; Connect dialog lists
+                                           # visible pi_SW# APs or takes an IP
     python -m tui --host 192.168.1.100     # connect directly
     python -m tui --host 192.168.1.100 --port 5555
+    python -m tui --log-level DEBUG        # verbose logging (default WARNING)
+
+Press ? in the app for the full key reference.
 """
 
 import argparse
