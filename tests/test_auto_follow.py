@@ -67,7 +67,10 @@ class TestAutoFollowBasics(unittest.TestCase):
 
 
 class TestAutoFollowHysteresis(unittest.TestCase):
-    """Drive the controller via _tick() to exercise transitions deterministically."""
+    """Drive the controller via _tick() to exercise transitions deterministically.
+
+    Leaving switching must be fast: the exit tests below call _tick()
+    straight after engaging, so any post-engage hold-off/delay fails them."""
 
     def setUp(self):
         self.h = _Harness()
@@ -120,6 +123,22 @@ class TestAutoFollowHysteresis(unittest.TestCase):
         self.h.sensor = _sensor(-0.050)
         self.af._tick()
         self.assertEqual(self.h.mode_calls, ["discharge"])
+        self.assertFalse(self.af.active)
+
+    def test_reengage_after_exit(self):
+        # Engage -> exit -> engage again, each on the next tick.
+        self.h.sensor = _sensor(0.010)
+        self.af._tick()
+        self.h.sensor = _sensor(0.001)
+        self.af._tick()
+        self.h.sensor = _sensor(0.010)
+        self.af._tick()
+        self.assertEqual(self.h.mode_calls, ["charge", "discharge", "charge"])
+        self.assertTrue(self.af.active)
+        # ...and the second engagement exits just as fast as the first.
+        self.h.sensor = _sensor(-0.050)
+        self.af._tick()
+        self.assertEqual(self.h.mode_calls[-1], "discharge")
         self.assertFalse(self.af.active)
 
     def test_negative_current_does_not_engage(self):

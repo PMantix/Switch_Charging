@@ -69,8 +69,6 @@ class AutoFollow:
         self._latest_avg_i = 0.0
         self._latest_avg_v = 0.0
         self._cc_setpoint_a = 0.0  # user-specified CC setpoint for recommendations
-        self._holdoff_until = 0.0  # monotonic time until which exit checks are suppressed
-        self._holdoff_s = 2.0     # seconds to suppress exit after entering switching
 
         self._loop_period = 1.0 / float(loop_hz)
         self._thread: Optional[threading.Thread] = None
@@ -201,7 +199,6 @@ class AutoFollow:
             sleep(self._loop_period)
 
     def _tick(self):
-        from time import monotonic
         if self._is_data_fresh is not None and not self._is_data_fresh():
             return
         sensor_data = self._get_sensor_data()
@@ -210,7 +207,6 @@ class AutoFollow:
         result = self._detector.feed(sensor_data)
         avg_i = result.avg_current
         avg_v = result.avg_voltage
-        now = monotonic()
 
         target = None
         with self._lock:
@@ -221,13 +217,10 @@ class AutoFollow:
             if not self._is_active and avg_i > self._i_enter_a:
                 target = self._target_mode
                 self._is_active = True
-                self._holdoff_until = now + self._holdoff_s
             elif self._is_active and avg_i < self._i_exit_a:
-                if now < self._holdoff_until:
-                    pass  # suppress exit during hold-off
-                else:
-                    target = "discharge"
-                    self._is_active = False
+                # Exit on the next tick — leaving switching should be fast.
+                target = "discharge"
+                self._is_active = False
 
         if target is not None:
             log.info("AutoFollow: -> %s (i=%.4f A)", target, avg_i)
