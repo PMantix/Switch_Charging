@@ -234,6 +234,7 @@ class RotaryController:
 # ---------------------------------------------------------------------------
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 SIM_STATE_FILE = Path.home() / ".switching_circuit_state.sim.json"
+SIM_SWEEP_LOG_FILE = Path.home() / "freq_sweep_log.sim.csv"
 
 
 def _parse_args(argv=None):
@@ -259,8 +260,9 @@ def _enter_sim_mode():
     """Keep a simulation from touching anything a real server owns: its
     persisted state goes to a separate file, and the cwd-relative
     schedules/ directory resolves against the repo root."""
-    from server import state_persistence
+    from server import freq_sweep, state_persistence
     state_persistence.STATE_FILE = SIM_STATE_FILE
+    freq_sweep.DEFAULT_LOG_FILE = SIM_SWEEP_LOG_FILE
     os.chdir(_REPO_ROOT)
     log.warning("=" * 60)
     log.warning("SIMULATION MODE — not connected to any hardware")
@@ -318,6 +320,10 @@ def main():
                 mc.set_auto_follow_target(af["target_mode"])
             if af.get("cc_setpoint_a") is not None:
                 mc._auto_follow.set_cc_setpoint(af["cc_setpoint_a"])
+            # Sweep position is restored before auto-follow is enabled, so
+            # a restart mid-experiment resumes on the right entry.
+            if saved_state.get("freq_sweep"):
+                mc.get_freq_sweep().restore(saved_state["freq_sweep"])
             if saved_state.get("mode"):
                 mc.set_mode(saved_state["mode"])
             if af.get("enabled"):

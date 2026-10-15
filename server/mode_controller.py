@@ -8,6 +8,8 @@ shoot-through.  All public methods are thread-safe.
 Two cycler-aware subsystems run alongside:
   - AutoFollow: hysteresis-based current-driven mode switcher (active
     control). Optional, toggled by user from the TUI.
+  - FreqSweep: optional per-cycle frequency/mode list that AutoFollow
+    consults at each charge onset (server/freq_sweep.py).
   - ScheduleMonitor: passive PLAN-vs-OBSERVED tracker. Always running;
     fed by load_schedule(); does not control any modes.
 """
@@ -19,6 +21,7 @@ from time import sleep
 
 from server.auto_follow import ALLOWED_TARGET_MODES, AutoFollow
 from server.config import DEAD_TIME
+from server.freq_sweep import FreqSweep
 from server.schedule_monitor import ScheduleMonitor
 
 log = logging.getLogger(__name__)
@@ -42,12 +45,17 @@ class ModeController:
         self._mode = Mode.IDLE
         self._loaded_schedule = None
 
+        # Per-cycle frequency sweep, consulted by auto-follow at each
+        # charge onset. Off until configured and enabled.
+        self._freq_sweep = FreqSweep(set_frequency_fn=self._engine.set_frequency)
+
         # Auto-follow: hysteresis-based current-driven mode switcher.
         # Started here but disabled by default; user toggles via TUI.
         self._auto_follow = AutoFollow(
             get_sensor_data_fn=self._gpio.get_sensor_data,
             set_mode_fn=lambda m: self._set_mode_internal(Mode(m)),
             is_data_fresh_fn=self._gpio.sensor_data_fresh,
+            sweep=self._freq_sweep,
         )
         self._auto_follow.start()
 
@@ -240,6 +248,11 @@ class ModeController:
     def get_auto_follow_status(self) -> dict:
         return self._auto_follow.get_status()
 
+    # -- frequency sweep -----------------------------------------------------
+
+    def get_freq_sweep(self) -> FreqSweep:
+        return self._freq_sweep
+
     # -- debug helpers -------------------------------------------------------
 
     def set_fet(self, index: int, on: bool):
@@ -307,5 +320,6 @@ class ModeController:
         if mode == Mode.DEBUG:
             status["debug_step"] = debug_step
         status["auto_follow"] = self._auto_follow.get_status()
+        status["freq_sweep"] = self._freq_sweep.get_status()
         status["schedule_monitor"] = self._schedule_monitor.get_status()
         return status

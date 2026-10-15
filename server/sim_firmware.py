@@ -14,10 +14,19 @@ drifts up while switching (charge / pulse), down while all-on
 which FETs the programmed cycle has on at that instant, so the KCL sum
 the auto-follow controller uses stays smooth while the individual
 channels chop with the switching pattern.
+
+SC_SIM_CYCLER="charge_s,rest_s,discharge_s,rest_s" (e.g. "60,10,60,10")
+replaces that with an external cycler on a fixed timetable: the cycler
+current follows the clock (+charge / 0 / -discharge / 0) whatever the
+FETs do, as long as both sides have a path. That is what auto-follow
+and the frequency sweep see on a real Neware, so it is the mode to use
+for exercising them; the default model derives the current from the
+FETs, which is circular for auto-follow.
 """
 
 import json
 import logging
+import os
 import random
 import threading
 import time
@@ -34,6 +43,22 @@ _DISCHARGE_A = -0.300    # cycler current while all-on
 _CAPACITY_AS = 240.0     # amp-seconds per full SOC swing — ~16 min at 0.25 A
 _R_INTERNAL = 0.08       # ohm — IR rise/sag on the per-cell voltage
 _V_OFFSETS = (0.000, 0.012, -0.008, 0.005)  # per-channel cell mismatch
+
+
+def _parse_cycler_env(text):
+    """'60,10,60,10' -> (60.0, 10.0, 60.0, 10.0), or None if unset/invalid."""
+    text = text.strip()
+    if not text:
+        return None
+    try:
+        parts = tuple(float(x) for x in text.split(","))
+    except ValueError:
+        log.warning("SC_SIM_CYCLER=%r is not 4 comma-separated numbers — ignored", text)
+        return None
+    if len(parts) != 4 or any(x < 0 for x in parts) or sum(parts) <= 0:
+        log.warning("SC_SIM_CYCLER=%r needs charge,rest,discharge,rest seconds — ignored", text)
+        return None
+    return parts
 
 
 def _unpack(packed):
@@ -66,6 +91,10 @@ class SimFirmware:
         self._soc = 0.45
         self._v_relax = 0.0              # slow IR relaxation after current stops
         self._seq = 0
+        self._cycler = _parse_cycler_env(os.environ.get("SC_SIM_CYCLER", ""))
+        if self._cycler:
+            log.warning("SIMULATION: timed external cycler %s s "
+                        "(charge, rest, discharge, rest)", self._cycler)
 
         self._stop = threading.Event()
         self._thread = threading.Thread(
@@ -171,6 +200,18 @@ class SimFirmware:
 
     # -- plant model ----------------------------------------------------------
 
+    def _cycler_current(self, now):
+        """Cycler current on the SC_SIM_CYCLER timetable."""
+        charge, rest1, discharge, _rest2 = self._cycler
+        t = (now - self._t0) % sum(self._cycler)
+        if t < charge:
+            return _CHARGE_A
+        if t < charge + rest1:
+            return 0.0
+        if t < charge + rest1 + discharge:
+            return _DISCHARGE_A
+        return 0.0
+
     def _fets_now(self, now):
         """(fets tuple, switching?, step period s, cycle) at time ``now``."""
         if not self._running:
@@ -192,6 +233,8 @@ class SimFirmware:
         # when a side is fully open.
         if not (p_on and n_on):
             i_cyc = 0.0
+        elif self._cycler:
+            i_cyc = self._cycler_current(now)
         elif all_on:
             i_cyc = _DISCHARGE_A
         elif switching:

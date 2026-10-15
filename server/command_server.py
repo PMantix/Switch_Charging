@@ -63,6 +63,13 @@ class CommandServer:
         # TUI broadcast rate, which used to cap everything at 30 Hz.
         self._mc._gpio.on_sensor_tick = self._on_sensor_tick
 
+        # The sweep advances from the auto-follow thread at each charge
+        # onset. Persist off-thread: _persist_state() queries the RP2040
+        # (M command), which must not delay engaging switching.
+        self._mc.get_freq_sweep().on_change = lambda: threading.Thread(
+            target=self._persist_state, name="SweepPersist", daemon=True,
+        ).start()
+
     # -- state persistence (survive a power cycle) ---------------------------
 
     def _persist_state(self) -> None:
@@ -99,6 +106,7 @@ class CommandServer:
                     "i_exit_a": af.get("i_exit_a"),
                     "cc_setpoint_a": af.get("cc_setpoint_a"),
                 },
+                "freq_sweep": self._mc.get_freq_sweep().to_state(),
             })
         except Exception:
             log.exception("Failed to persist state")
@@ -500,6 +508,58 @@ class CommandServer:
                 self._mc._auto_follow.set_cc_setpoint(amps)
                 self._persist_state()
                 return {"ok": True, "auto_follow": self._mc.get_auto_follow_status()}
+
+            # -- frequency sweep (per-cycle frequency/mode list) -------------
+            # Every sweep mutation persists via FreqSweep.on_change.
+
+            elif cmd == "sweep_status":
+                return {"ok": True, "freq_sweep": self._mc.get_freq_sweep().get_status()}
+
+            elif cmd == "sweep_configure":
+                self._mc.get_freq_sweep().configure(
+                    entries=msg.get("entries"),
+                    default_mode=msg.get("default_mode"),
+                    end=msg.get("end"),
+                    discharge_a=msg.get("discharge_a"),
+                    discharge_confirm_s=msg.get("discharge_confirm_s"),
+                )
+                return {"ok": True, "freq_sweep": self._mc.get_freq_sweep().get_status()}
+
+            elif cmd == "sweep_add":
+                if "entry" not in msg:
+                    return {"ok": False, "error": "Missing 'entry' field"}
+                self._mc.get_freq_sweep().add_entry(msg["entry"], msg.get("position"))
+                return {"ok": True, "freq_sweep": self._mc.get_freq_sweep().get_status()}
+
+            elif cmd == "sweep_remove":
+                if msg.get("index") is None:
+                    return {"ok": False, "error": "Missing 'index' field"}
+                self._mc.get_freq_sweep().remove_entry(msg["index"])
+                return {"ok": True, "freq_sweep": self._mc.get_freq_sweep().get_status()}
+
+            elif cmd == "sweep_replace":
+                if msg.get("index") is None or "entry" not in msg:
+                    return {"ok": False, "error": "Need 'index' and 'entry'"}
+                self._mc.get_freq_sweep().replace_entry(msg["index"], msg["entry"])
+                return {"ok": True, "freq_sweep": self._mc.get_freq_sweep().get_status()}
+
+            elif cmd == "sweep_set_index":
+                if msg.get("index") is None:
+                    return {"ok": False, "error": "Missing 'index' field"}
+                self._mc.get_freq_sweep().set_next_index(msg["index"])
+                return {"ok": True, "freq_sweep": self._mc.get_freq_sweep().get_status()}
+
+            elif cmd == "sweep_set_end":
+                self._mc.get_freq_sweep().set_end(msg.get("end"))
+                return {"ok": True, "freq_sweep": self._mc.get_freq_sweep().get_status()}
+
+            elif cmd == "sweep_enable":
+                self._mc.get_freq_sweep().set_enabled(bool(msg.get("enabled", False)))
+                return {"ok": True, "freq_sweep": self._mc.get_freq_sweep().get_status()}
+
+            elif cmd == "sweep_reset":
+                self._mc.get_freq_sweep().reset()
+                return {"ok": True, "freq_sweep": self._mc.get_freq_sweep().get_status()}
 
             # -- schedule monitor (passive PLAN/OBSERVED tracker) ------------
 

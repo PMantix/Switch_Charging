@@ -14,6 +14,10 @@ state when no switching circuit is between cycler and cells.
 Lifecycle: a single daemon thread polls sensor data at AUTO_FOLLOW_LOOP_HZ.
 The thread runs whenever the controller is started; the `enabled` flag
 gates whether transitions actually fire.
+
+Optional FreqSweep (server/freq_sweep.py): when one is attached and
+enabled, each engage asks it which mode/frequency to use for that
+charge instead of using target_mode.
 """
 
 from __future__ import annotations
@@ -47,6 +51,7 @@ class AutoFollow:
         i_exit_a: float = AUTO_FOLLOW_I_EXIT_A,
         loop_hz: float = AUTO_FOLLOW_LOOP_HZ,
         is_data_fresh_fn: Optional[Callable[[], bool]] = None,
+        sweep=None,
     ):
         if i_enter_a <= i_exit_a:
             raise ValueError(
@@ -59,6 +64,7 @@ class AutoFollow:
         # current mode is held until live data returns.
         self._is_data_fresh = is_data_fresh_fn
         self._detector = CyclerDetector()  # used only for its KCL avg_current
+        self._sweep = sweep
 
         self._lock = threading.Lock()
         self._enabled = False
@@ -149,10 +155,14 @@ class AutoFollow:
         if mode not in ALLOWED_TARGET_MODES:
             return
         do_apply = False
+        sweeping = self._sweep is not None and self._sweep.enabled
         with self._lock:
             if self._target_mode != mode:
                 self._target_mode = mode
-                if self._enabled and self._is_active:
+                # While a sweep is running it owns the mode of the
+                # current charge; the new target only matters once the
+                # sweep is turned off.
+                if self._enabled and self._is_active and not sweeping:
                     do_apply = True
         if do_apply:
             self._set_mode(mode)
@@ -214,6 +224,7 @@ class AutoFollow:
             self._latest_avg_v = avg_v
             if not self._enabled:
                 return
+            sweep = self._sweep
             if not self._is_active and avg_i > self._i_enter_a:
                 target = self._target_mode
                 self._is_active = True
@@ -221,6 +232,19 @@ class AutoFollow:
                 # Exit on the next tick — leaving switching should be fast.
                 target = "discharge"
                 self._is_active = False
+
+        if sweep is not None:
+            sweep.observe(avg_i)
+            if target is not None and target != "discharge":
+                # Charge onset: the sweep sets the frequency now, while the
+                # engine is still paused in pass-through, and picks the mode.
+                swept = sweep.on_charge_onset(avg_i, avg_v)
+                if swept == "passthrough":
+                    log.info("AutoFollow: sweep control cycle — staying transparent "
+                             "(i=%.4f A)", avg_i)
+                    return
+                if swept is not None:
+                    target = swept
 
         if target is not None:
             log.info("AutoFollow: -> %s (i=%.4f A)", target, avg_i)
