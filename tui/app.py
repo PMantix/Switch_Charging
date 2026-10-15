@@ -1035,6 +1035,7 @@ class SwitchingCircuitApp(App):
                 sweep_panel = self.query_one("#sweep-panel", SweepPanel)
                 sweep_panel.freq_sweep = fs
                 sweep_panel.auto_follow_enabled = bool((af or {}).get("enabled"))
+                sweep_panel.engage_delay_s = float((af or {}).get("engage_delay_s") or 0.0)
                 if isinstance(self.screen, SweepScreen):
                     self.screen.freq_sweep = fs
 
@@ -1965,7 +1966,9 @@ class SwitchingCircuitApp(App):
             self.notify("This Pi's server has no frequency sweep - deploy the latest server code.",
                         title="Sweep", severity="warning")
             return
-        self.push_screen(SweepScreen(self._latest_freq_sweep, self._send_sweep))
+        self.push_screen(SweepScreen(
+            self._latest_freq_sweep, self._send_sweep,
+            engage_delay_s=float(self._latest_auto_follow.get("engage_delay_s") or 0.0)))
 
     def action_auto_follow_toggle(self) -> None:
         new = not bool(self._latest_auto_follow.get("enabled", False))

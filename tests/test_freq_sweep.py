@@ -362,5 +362,73 @@ class TestAutoFollowWithSweep(unittest.TestCase):
         self.set_freq.assert_not_called()
 
 
+
+class TestEngageDelay(unittest.TestCase):
+    """Schedule shape on 4-3: 1 s DCIR pulse (step 7), 5 s rest, then a
+    30 min CC charge (step 9), all at 1.5C = 312 mA."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.sweep, self.set_freq, self.clock = _make_sweep(self._tmp.name)
+        self.sensor = _sensor(0.0)
+        self.modes = []
+        self.af = AutoFollow(lambda: self.sensor, MagicMock(side_effect=self.modes.append),
+                             i_enter_a=0.0657, i_exit_a=0.0448, sweep=self.sweep,
+                             clock=self.clock)
+        self.af.set_engage_delay(3.0)
+        self.af.set_enabled(True)
+        self.modes.clear()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, i, seconds, dt=1 / 15):
+        self.sensor = _sensor(i)
+        for _ in range(int(round(seconds / dt))):
+            self.clock.t += dt
+            self.af._tick()
+
+    def test_short_pulse_stays_passthrough(self):
+        self._run(0.312, 1.0)              # step 7
+        self._run(0.0, 5.0)                # step 8
+        self.assertEqual(self.modes, [])
+        self.set_freq.assert_not_called()
+        self.assertEqual(self.sweep.get_status()["cycle"], 0)
+
+    def test_long_step_engages_after_delay(self):
+        self._run(0.312, 1.0)
+        self._run(0.0, 5.0)
+        self._run(0.312, 2.5)              # step 9, inside the delay
+        self.assertEqual(self.modes, [])
+        self.assertIsNotNone(self.af.get_status()["engage_pending_s"])
+        self._run(0.312, 1.0)              # past 3 s above i_enter
+        self.assertEqual(self.modes, ["charge"])
+        self.set_freq.assert_called_once_with(10.0)
+        self.assertIsNone(self.af.get_status()["engage_pending_s"])
+
+    def test_exit_is_not_delayed(self):
+        self._run(0.312, 4.0)
+        self.modes.clear()
+        self._run(0.0, 2 / 15)
+        self.assertEqual(self.modes, ["discharge"])
+
+    def test_dip_restarts_the_delay(self):
+        self._run(0.312, 2.5)
+        self._run(0.0, 1.0)                # current falls back below i_enter
+        self._run(0.312, 2.5)
+        self.assertEqual(self.modes, [])
+
+    def test_zero_delay_engages_immediately(self):
+        self.af.set_engage_delay(0.0)
+        self._run(0.312, 1.0)
+        self.assertEqual(self.modes[:1], ["charge"])
+
+    def test_delay_validation(self):
+        with self.assertRaises(ValueError):
+            self.af.set_engage_delay(-1)
+        with self.assertRaises(ValueError):
+            self.af.set_engage_delay(601)
+
+
 if __name__ == "__main__":
     unittest.main()

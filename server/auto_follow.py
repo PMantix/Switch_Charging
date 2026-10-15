@@ -18,13 +18,20 @@ gates whether transitions actually fire.
 Optional FreqSweep (server/freq_sweep.py): when one is attached and
 enabled, each engage asks it which mode/frequency to use for that
 charge instead of using target_mode.
+
+engage_delay_s (default 0) requires the current to stay above i_enter
+for that long before switching engages. It keeps short cycler pulses
+(e.g. a 1 s DCIR pulse) in pass-through, and on a long CC step it
+leaves a pass-through window at full current right before switching
+starts — the voltage step at engage then measures the resistance the
+switching adds. Exit is never delayed.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
-from time import sleep
+from time import monotonic, sleep
 from typing import Callable, Optional
 
 from server.config import (
@@ -52,6 +59,7 @@ class AutoFollow:
         loop_hz: float = AUTO_FOLLOW_LOOP_HZ,
         is_data_fresh_fn: Optional[Callable[[], bool]] = None,
         sweep=None,
+        clock: Callable[[], float] = monotonic,
     ):
         if i_enter_a <= i_exit_a:
             raise ValueError(
@@ -65,6 +73,7 @@ class AutoFollow:
         self._is_data_fresh = is_data_fresh_fn
         self._detector = CyclerDetector()  # used only for its KCL avg_current
         self._sweep = sweep
+        self._clock = clock
 
         self._lock = threading.Lock()
         self._enabled = False
@@ -75,6 +84,8 @@ class AutoFollow:
         self._latest_avg_i = 0.0
         self._latest_avg_v = 0.0
         self._cc_setpoint_a = 0.0  # user-specified CC setpoint for recommendations
+        self._engage_delay_s = 0.0
+        self._above_since: Optional[float] = None  # when avg_i first rose above i_enter
 
         self._loop_period = 1.0 / float(loop_hz)
         self._thread: Optional[threading.Thread] = None
@@ -117,6 +128,7 @@ class AutoFollow:
         with self._lock:
             was_enabled = self._enabled
             self._enabled = bool(enabled)
+            self._above_since = None
             if not was_enabled and self._enabled:
                 do_reset = True
                 self._is_active = False
@@ -140,6 +152,14 @@ class AutoFollow:
             self._i_exit_a = float(i_exit_a)
         log.info("AutoFollow: thresholds enter=%.4f A exit=%.4f A",
                  i_enter_a, i_exit_a)
+
+    def set_engage_delay(self, seconds: float):
+        seconds = float(seconds)
+        if not 0.0 <= seconds <= 600.0:
+            raise ValueError(f"engage delay must be 0-600 s, got {seconds}")
+        with self._lock:
+            self._engage_delay_s = seconds
+        log.info("AutoFollow: engage delay=%.1f s", seconds)
 
     def set_cc_setpoint(self, amps: float):
         with self._lock:
@@ -182,6 +202,13 @@ class AutoFollow:
                 "avg_current_a": round(self._latest_avg_i, 6),
                 "avg_voltage_v": round(self._latest_avg_v, 4),
                 "cc_setpoint_a": cc,
+                "engage_delay_s": self._engage_delay_s,
+                # Seconds the current has been above i_enter while
+                # waiting out the engage delay (None when not waiting).
+                "engage_pending_s": (
+                    round(self._clock() - self._above_since, 1)
+                    if self._above_since is not None and not self._is_active else None
+                ),
             }
             if cc > 0:
                 status["rec_enter_a"] = round(cc * 0.35, 6)
@@ -226,8 +253,15 @@ class AutoFollow:
                 return
             sweep = self._sweep
             if not self._is_active and avg_i > self._i_enter_a:
-                target = self._target_mode
-                self._is_active = True
+                now = self._clock()
+                if self._above_since is None:
+                    self._above_since = now
+                if now - self._above_since >= self._engage_delay_s:
+                    target = self._target_mode
+                    self._is_active = True
+                    self._above_since = None
+            elif not self._is_active:
+                self._above_since = None
             elif self._is_active and avg_i < self._i_exit_a:
                 # Exit on the next tick — leaving switching should be fast.
                 target = "discharge"

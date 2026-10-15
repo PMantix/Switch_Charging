@@ -113,6 +113,7 @@ class SweepPanel(Widget):
 
     freq_sweep: reactive[dict] = reactive({}, layout=True)
     auto_follow_enabled: reactive[bool] = reactive(False)
+    engage_delay_s: reactive[float] = reactive(0.0)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -123,7 +124,7 @@ class SweepPanel(Widget):
         # Broadcasts arrive at ~30 Hz but the sweep changes a few times
         # per cycle; cache the Text on a snapshot of the inputs.
         try:
-            key = json.dumps([self.freq_sweep, self.auto_follow_enabled],
+            key = json.dumps([self.freq_sweep, self.auto_follow_enabled, self.engage_delay_s],
                              sort_keys=True, default=str)
         except (TypeError, ValueError):
             key = None
@@ -175,7 +176,10 @@ class SweepPanel(Widget):
         t.append("\n ENTRIES\n", style="bold white")
         render_entry_list(t, fs)
 
-        t.append("\n Discharge confirm: ", style="dim")
+        t.append("\n Start delay:  ", style="dim")
+        t.append(f"{self.engage_delay_s:g} s\n" if self.engage_delay_s else "off\n",
+                 style="dim")
+        t.append(" Discharge confirm: ", style="dim")
         t.append(f"< -{fs.get('discharge_a', 0) * 1000:g} mA "
                  f"for {fs.get('discharge_confirm_s', 0):g} s\n", style="dim")
 
@@ -218,9 +222,11 @@ class SweepScreen(ModalScreen[None]):
 
     freq_sweep: reactive[dict] = reactive({})
 
-    def __init__(self, freq_sweep: dict, send: Callable[[dict], None]):
+    def __init__(self, freq_sweep: dict, send: Callable[[dict], None],
+                 engage_delay_s: float = 0.0):
         super().__init__()
         self._send = send
+        self._engage_delay_s = engage_delay_s
         self.set_reactive(SweepScreen.freq_sweep, dict(freq_sweep or {}))
 
     def compose(self) -> ComposeResult:
@@ -253,6 +259,12 @@ class SweepScreen(ModalScreen[None]):
             with Horizontal(classes="row"):
                 yield Input(placeholder="e.g. 10, 20, 50, 100, 300, 1000", id="in-list")
                 yield Button("Replace", id="btn-list", variant="error")
+
+            yield Label("Switching start delay, s (auto-follow; keeps short pulses "
+                        "unswitched, 0 = off):", classes="field-label")
+            with Horizontal(classes="row"):
+                yield Input(value=f"{self._engage_delay_s:g}", id="in-delay")
+                yield Button("Set delay", id="btn-delay")
 
             with Horizontal(id="toggle-row"):
                 yield Button(self._enable_label(), id="btn-enable", variant="success")
@@ -298,7 +310,8 @@ class SweepScreen(ModalScreen[None]):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         button = {"in-add": "btn-add", "in-remove": "btn-remove",
-                  "in-next": "btn-next", "in-list": "btn-list"}.get(event.input.id)
+                  "in-next": "btn-next", "in-list": "btn-list",
+                  "in-delay": "btn-delay"}.get(event.input.id)
         if button:
             self._do(button)
 
@@ -352,6 +365,17 @@ class SweepScreen(ModalScreen[None]):
             self._send({"cmd": "sweep_configure", "entries": entries})
             box.value = ""
             return f"List replaced ({len(entries)} entries), starting at entry 1"
+        if button_id == "btn-delay":
+            text = self.query_one("#in-delay", Input).value.strip().removesuffix("s").strip()
+            try:
+                seconds = float(text)
+            except ValueError:
+                raise ValueError(f"{text!r} is not a number of seconds")
+            if not 0 <= seconds <= 600:
+                raise ValueError("Delay must be 0-600 s")
+            self._send({"cmd": "auto_follow_set_engage_delay", "engage_delay_s": seconds})
+            return (f"Switching starts {seconds:g} s after the current passes I_enter"
+                    if seconds else "Start delay off: switching starts immediately")
         if button_id == "btn-enable":
             on = not fs.get("enabled")
             if on and n == 0:

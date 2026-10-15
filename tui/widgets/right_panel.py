@@ -92,6 +92,8 @@ class RightPanel(Widget):
             round(af.get("i_enter_a", 0.0), 6),
             round(af.get("i_exit_a", 0.0), 6),
             round(af.get("avg_current_a", 0.0), 4),
+            af.get("engage_delay_s"),
+            af.get("engage_pending_s"),
         )
         key = (self.mode, self.sequence, self.frequency, self.step,
                self.connected, self.conn_status, self.link_down,
@@ -294,6 +296,13 @@ class RightPanel(Widget):
             t.append(f" {_fmt_ma(rec_enter_ma)}/{_fmt_ma(rec_exit_ma)} mA", style="italic yellow")
             t.append("\n")
 
+        delay_s = af.get("engage_delay_s") or 0.0
+        t.append(" Delay  ", style="dim")
+        t.append(f" {delay_s:g} s" if delay_s else "  off", style="bold white" if delay_s else "dim")
+        t.append("   (sweep editor ", style="dim")
+        t.append(" f ", style="bold white on dark_blue")
+        t.append(")\n", style="dim")
+
         t.append(" Live i ", style="dim")
         t.append(f" {avg_i_ma:+6.2f} mA\n", style="white")
 
@@ -302,6 +311,9 @@ class RightPanel(Widget):
             t.append(" off\n", style="dim")
         elif active:
             t.append(" SWITCHING\n", style="bold green")
+        elif af.get("engage_pending_s") is not None:
+            t.append(f" starting in {max(0.0, delay_s - af['engage_pending_s']):.0f} s\n",
+                     style="bold cyan")
         else:
             t.append(" transparent\n", style="bold yellow")
 

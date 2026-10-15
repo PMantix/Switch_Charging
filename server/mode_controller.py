@@ -242,6 +242,9 @@ class ModeController:
     def set_auto_follow_thresholds(self, i_enter_a: float, i_exit_a: float):
         self._auto_follow.set_thresholds(i_enter_a, i_exit_a)
 
+    def set_auto_follow_engage_delay(self, seconds: float):
+        self._auto_follow.set_engage_delay(seconds)
+
     def set_auto_follow_target(self, mode: str):
         self._auto_follow.set_target_mode(mode)
 

@@ -105,6 +105,7 @@ class CommandServer:
                     "i_enter_a": af.get("i_enter_a"),
                     "i_exit_a": af.get("i_exit_a"),
                     "cc_setpoint_a": af.get("cc_setpoint_a"),
+                    "engage_delay_s": af.get("engage_delay_s", 0.0),
                 },
                 "freq_sweep": self._mc.get_freq_sweep().to_state(),
             })
@@ -497,6 +498,15 @@ class CommandServer:
                 if target not in ("charge", "pulse_charge"):
                     return {"ok": False, "error": "target_mode must be 'charge' or 'pulse_charge'"}
                 self._mc.set_auto_follow_target(target)
+                self._persist_state()
+                return {"ok": True, "auto_follow": self._mc.get_auto_follow_status()}
+
+            elif cmd == "auto_follow_set_engage_delay":
+                try:
+                    seconds = float(msg["engage_delay_s"])
+                except (KeyError, TypeError, ValueError) as e:
+                    return {"ok": False, "error": f"Need numeric engage_delay_s: {e}"}
+                self._mc.set_auto_follow_engage_delay(seconds)
                 self._persist_state()
                 return {"ok": True, "auto_follow": self._mc.get_auto_follow_status()}
 
