@@ -60,6 +60,9 @@ class LeftPanel(Widget):
                 (" ;/' ", f"I_exit -/+{exit_step}"),
                 (" </> ", "CC set 0-100mA" if self.coincell else "CC setpoint"),
             ]),
+            ("FREQ SWEEP", [
+                ("  f  ", "Edit sweep"),
+            ]),
             ("SCHEDULE MONITOR", [
                 ("  a  ", "Load schedule"),
                 ("  M  ", "Restart clock"),
@@ -81,7 +84,7 @@ class LeftPanel(Widget):
                 ("S+\u2190/\u2192", "Sideways"),
             ]),
             ("OTHER", [
-                (" Tab ", "Status/Monitor"),
+                (" Tab ", "Status/Monitor/Sweep"),
                 ("  D  ", "Latency probe"),
                 ("  ?  ", "Full help"),
                 ("  q  ", "Quit"),

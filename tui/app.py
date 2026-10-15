@@ -33,6 +33,7 @@ from tui.widgets.eth_picker import EthPicker
 from tui.widgets.right_panel import RightPanel
 from tui.widgets.sensor_plot import SensorPlot
 from tui.widgets.auto_panel import AutoPanel
+from tui.widgets.sweep_panel import SweepPanel, SweepScreen
 from tui.widgets.connection_bar import ConnectionBar
 from tui.widgets.mascot import Mascot
 from tui.widgets.schedule_screen import SchedulePickerScreen, SchedulePreviewScreen
@@ -363,6 +364,10 @@ class HelpScreen(ModalScreen[None]):
                 "  [bold]; / '[/]     I_exit -/+ 0.5 mA  [dim](0.05 mA coin-cell)[/]\n"
                 "  [bold]< / >[/]     CC setpoint -/+  [dim](coin-cell: 0.1 mA)[/]\n"
                 "            [dim]also sets I_enter/I_exit to 35% / 15% of it[/]\n\n"
+                "[bold white]FREQUENCY SWEEP[/]  [dim](Tab to view)[/]\n"
+                "  [bold]f[/]         Edit the sweep: steps the switching\n"
+                "            frequency each cycler cycle (needs auto-\n"
+                "            follow on; never switches on discharge)\n\n"
                 "[bold white]SCHEDULE MONITOR[/]  [dim](Tab to view)[/]\n"
                 "  [bold]a[/]         Load a schedule to monitor\n"
                 "            [dim](does not change the circuit mode)[/]\n"
@@ -612,6 +617,7 @@ class SwitchingCircuitApp(App):
         Binding("R", "toggle_plot_range", "Range", show=False),
         Binding("z", "zero_current", "Zero I", show=False),
         Binding("u", "toggle_coincell", "Coin-cell", show=False),
+        Binding("f", "sweep_editor", "Frequency sweep", show=False),
         # Keyboard fallback for scrolling on small screens (wheel also works).
         Binding("pagedown", "scroll_col('center-col', 1)", "Scroll", show=False),
         Binding("pageup", "scroll_col('center-col', -1)", "Scroll", show=False),
@@ -653,6 +659,8 @@ class SwitchingCircuitApp(App):
         self._showing_auto_panel = False  # right column: status vs auto panel
         self._prev_mode = "idle"         # track mode changes for panel auto-switch
         self._latest_auto_follow: dict = {}  # mirror of last auto_follow status
+        self._latest_freq_sweep: dict = {}   # mirror of last freq_sweep status
+        self._showing_sweep_panel = False    # right column: sweep view (Tab)
         self._link_stale = False  # Pi reports its RP2040 link down / sensor data frozen
         self._probe = LatencyProbe()
         self._offset_worker_started = False
@@ -689,6 +697,7 @@ class SwitchingCircuitApp(App):
             with Vertical(id="right-col"):
                 yield RightPanel(id="right-panel")
                 yield AutoPanel(id="auto-panel", classes="hidden")
+                yield SweepPanel(id="sweep-panel", classes="hidden")
         yield Footer()
 
     # -- Lifecycle -----------------------------------------------------------
@@ -1020,10 +1029,23 @@ class SwitchingCircuitApp(App):
             monitor_data = data.get("schedule_monitor", {}) or {}
             auto_panel.monitor_data = monitor_data
 
+            fs = data.get("freq_sweep")
+            if fs is not None:
+                self._latest_freq_sweep = fs
+                sweep_panel = self.query_one("#sweep-panel", SweepPanel)
+                sweep_panel.freq_sweep = fs
+                sweep_panel.auto_follow_enabled = bool((af or {}).get("enabled"))
+                if isinstance(self.screen, SweepScreen):
+                    self.screen.freq_sweep = fs
+
             schedule_loaded = bool(monitor_data.get("loaded"))
             conn_bar.update_auto_status(monitor_data if schedule_loaded else {})
 
-            if schedule_loaded and not self._showing_auto_panel:
+            # Auto-switch to the monitor when a schedule loads, unless the
+            # user has the sweep view open.
+            if self._showing_sweep_panel:
+                pass
+            elif schedule_loaded and not self._showing_auto_panel:
                 self._showing_auto_panel = True
                 rpanel.add_class("hidden")
                 auto_panel.remove_class("hidden")
@@ -1280,17 +1302,34 @@ class SwitchingCircuitApp(App):
             self.notify(f"Failed to load schedule: {err}", title="Error", severity="error")
 
     def action_toggle_right_panel(self) -> None:
-        """Toggle between Status and Schedule monitor in the right column."""
+        """Cycle the right column: Status -> Schedule monitor -> Sweep."""
         rpanel = self.query_one("#right-panel", RightPanel)
         auto_panel = self.query_one("#auto-panel", AutoPanel)
+        sweep_panel = self.query_one("#sweep-panel", SweepPanel)
 
-        self._showing_auto_panel = not self._showing_auto_panel
-        if self._showing_auto_panel:
-            rpanel.add_class("hidden")
-            auto_panel.remove_class("hidden")
+        if self._showing_sweep_panel:
+            view = "status"
+        elif self._showing_auto_panel:
+            view = "sweep"
         else:
-            auto_panel.add_class("hidden")
-            rpanel.remove_class("hidden")
+            view = "monitor"
+        self._showing_auto_panel = view == "monitor"
+        self._showing_sweep_panel = view == "sweep"
+        for widget, shown in ((rpanel, view == "status"),
+                              (auto_panel, view == "monitor"),
+                              (sweep_panel, view == "sweep")):
+            if shown:
+                widget.remove_class("hidden")
+            else:
+                widget.add_class("hidden")
+
+    def check_action(self, action: str, parameters) -> Optional[bool]:
+        # q / space / Tab are priority bindings, so they would fire while
+        # typing in a text field (e.g. the sweep editor). Let the field
+        # have them instead.
+        if action in ("quit", "toggle_run", "toggle_right_panel") and isinstance(self.focused, Input):
+            return False
+        return True
 
     # -- Actions: Debug FET control ------------------------------------------
 
@@ -1911,6 +1950,23 @@ class SwitchingCircuitApp(App):
             return
         self._client.send_async(payload)
 
+    # -- Frequency sweep (per-cycle frequency list, see server/freq_sweep.py)
+
+    def _send_sweep(self, payload: dict) -> None:
+        """Fire-and-forget sweep_* command; the next state broadcast
+        carries the updated freq_sweep status."""
+        if not self._client or self._client.connection_state != ConnectionState.CONNECTED:
+            self.notify("Not connected to a Pi", title="Sweep", severity="warning")
+            return
+        self._client.send_async(payload)
+
+    def action_sweep_editor(self) -> None:
+        if not self._latest_freq_sweep:
+            self.notify("This Pi's server has no frequency sweep - deploy the latest server code.",
+                        title="Sweep", severity="warning")
+            return
+        self.push_screen(SweepScreen(self._latest_freq_sweep, self._send_sweep))
+
     def action_auto_follow_toggle(self) -> None:
         new = not bool(self._latest_auto_follow.get("enabled", False))
         self._send_auto_follow({"cmd": "auto_follow_set_enabled", "enabled": new})
@@ -2237,5 +2293,6 @@ class SwitchingCircuitApp(App):
         self._current_seq = 0
         self._prev_mode = "idle"
         self._showing_auto_panel = False
+        self._latest_freq_sweep = {}
         self._first_state_time = 0.0
         self._last_apply_time = 0.0
