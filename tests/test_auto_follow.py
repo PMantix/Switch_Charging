@@ -70,7 +70,10 @@ class TestAutoFollowHysteresis(unittest.TestCase):
     """Drive the controller via _tick() to exercise transitions deterministically.
 
     Leaving switching must be fast: the exit tests below call _tick()
-    straight after engaging, so any post-engage hold-off/delay fails them."""
+    straight after engaging, so any post-engage hold-off/delay fails them.
+    The low-current exit debounce is switched off here (exit_confirm_s=0)
+    so these test the raw hysteresis; TestExitConfirm covers the debounce,
+    and a reversal exits on the next tick with or without it."""
 
     def setUp(self):
         self.h = _Harness()
@@ -78,6 +81,7 @@ class TestAutoFollowHysteresis(unittest.TestCase):
             self.h.get_sensor, self.h.set_mode,
             i_enter_a=0.005, i_exit_a=0.002,
         )
+        self.af.set_exit_confirm(0.0)
         self.af.set_enabled(True)   # initial reset → "discharge"
         self.h.mode_calls.clear()
 
@@ -147,6 +151,101 @@ class TestAutoFollowHysteresis(unittest.TestCase):
         self.af._tick()
         self.assertEqual(self.h.mode_calls, [])
         self.assertFalse(self.af.active)
+
+
+class _Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+class TestExitConfirm(unittest.TestCase):
+    """Exit debounce, with SW7's settings (enter 0.100 A, exit 0.075 A).
+
+    At 308 mA from the cycler the Pi reads ~0.187 A; at 307 Hz single
+    ticks sag to 0.015-0.075 A and, before the debounce, each one ended
+    switching (cell 17, ~85 drop-outs per 30 min charge)."""
+
+    DT = 1 / 15
+
+    def setUp(self):
+        self.h = _Harness()
+        self.clock = _Clock()
+        self.af = AutoFollow(self.h.get_sensor, self.h.set_mode,
+                             i_enter_a=0.100, i_exit_a=0.075, clock=self.clock)
+        self.af.set_exit_confirm(1.0)
+        self.af.set_enabled(True)
+        self.h.mode_calls.clear()
+
+    def _run(self, i, seconds):
+        self.h.sensor = _sensor(i)
+        n = 0
+        for _ in range(int(round(seconds / self.DT))):
+            self.clock.t += self.DT
+            self.af._tick()
+            n += 1
+            if self.h.mode_calls[-1:] == ["discharge"]:
+                return n * self.DT
+        return None
+
+    def _engage(self, seconds=5.0):
+        self._run(0.187, seconds)
+        self.assertEqual(self.h.mode_calls, ["charge"])
+        self.h.mode_calls.clear()
+
+    def test_single_tick_sags_do_not_exit(self):
+        self._engage()
+        for sag in (0.015, 0.039, 0.0, 0.074):
+            self._run(sag, self.DT)
+            self._run(0.187, 0.5)
+        self.assertEqual(self.h.mode_calls, [])
+        self.assertTrue(self.af.active)
+
+    def test_half_second_sag_does_not_exit(self):
+        self._engage()
+        self._run(0.030, 0.5)
+        self._run(0.187, 2.0)
+        self.assertEqual(self.h.mode_calls, [])
+
+    def test_real_stop_exits_within_the_window(self):
+        self._engage()
+        took = self._run(0.0, 2.0)
+        self.assertIsNotNone(took)
+        self.assertLessEqual(took, 1.0)
+        self.assertFalse(self.af.active)
+
+    def test_reversal_exits_next_tick(self):
+        self._engage()
+        took = self._run(-0.089, 1.0)
+        self.assertAlmostEqual(took, self.DT)
+
+    def test_stop_right_after_engage_still_exits(self):
+        self._run(0.187, 0.2)
+        self.h.mode_calls.clear()
+        self.assertIsNotNone(self._run(0.0, 2.0))
+
+    def test_zero_confirm_is_single_tick(self):
+        self.af.set_exit_confirm(0.0)
+        self._engage()
+        self.assertAlmostEqual(self._run(0.030, 1.0), self.DT)
+
+    def test_window_restarts_after_reengage(self):
+        self._engage()
+        self._run(0.0, 2.0)                    # exits
+        self.h.mode_calls.clear()
+        self._run(0.187, 0.2)                  # re-engages
+        self.assertEqual(self.h.mode_calls, ["charge"])
+        self._run(0.030, 0.3)                  # short sag: the old low samples are gone
+        self.assertTrue(self.af.active)
+
+    def test_status_and_validation(self):
+        self.assertEqual(self.af.get_status()["exit_confirm_s"], 1.0)
+        with self.assertRaises(ValueError):
+            self.af.set_exit_confirm(-1)
+        with self.assertRaises(ValueError):
+            self.af.set_exit_confirm(11)
 
 
 class TestAutoFollowTargetMode(unittest.TestCase):

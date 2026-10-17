@@ -407,9 +407,12 @@ class TestEngageDelay(unittest.TestCase):
         self.assertIsNone(self.af.get_status()["engage_pending_s"])
 
     def test_exit_is_not_delayed(self):
+        # The engage delay never delays exit: the cycler reversing to its
+        # 89 mA discharge leaves switching on the next tick. (A fall to
+        # zero is debounced by exit_confirm_s instead; see test_auto_follow.)
         self._run(0.312, 4.0)
         self.modes.clear()
-        self._run(0.0, 2 / 15)
+        self._run(-0.089, 2 / 15)
         self.assertEqual(self.modes, ["discharge"])
 
     def test_dip_restarts_the_delay(self):

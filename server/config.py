@@ -139,6 +139,11 @@ DEAD_TIME = 0.002    # 2 ms
 AUTO_FOLLOW_I_ENTER_A = 0.050    # A — enter switching when |i| rises above this
 AUTO_FOLLOW_I_EXIT_A = 0.020     # A — drop back to transparent below this (or i<=0)
 AUTO_FOLLOW_LOOP_HZ = 15.0       # controller poll rate
+AUTO_FOLLOW_EXIT_CONFIRM_S = 1.0  # s — exit needs the MEAN current over this window below i_exit.
+                                  # One reading is not enough: at 307 Hz+ the four INA226s sample
+                                  # different switching phases and their KCL sum sags for a tick or two
+                                  # (SW7 / cell 17, 2026-10: ~85 false exits per 30 min charge).
+                                  # Reversal (i < -i_exit) still exits on the next tick. 0 = old behaviour.
 
 # ---------------------------------------------------------------------------
 # Schedule (loaded for monitoring; see schedule_monitor.py)

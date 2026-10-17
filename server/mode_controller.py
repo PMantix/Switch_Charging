@@ -245,6 +245,9 @@ class ModeController:
     def set_auto_follow_engage_delay(self, seconds: float):
         self._auto_follow.set_engage_delay(seconds)
 
+    def set_auto_follow_exit_confirm(self, seconds: float):
+        self._auto_follow.set_exit_confirm(seconds)
+
     def set_auto_follow_target(self, mode: str):
         self._auto_follow.set_target_mode(mode)
 

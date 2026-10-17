@@ -106,6 +106,7 @@ class CommandServer:
                     "i_exit_a": af.get("i_exit_a"),
                     "cc_setpoint_a": af.get("cc_setpoint_a"),
                     "engage_delay_s": af.get("engage_delay_s", 0.0),
+                    "exit_confirm_s": af.get("exit_confirm_s"),
                 },
                 "freq_sweep": self._mc.get_freq_sweep().to_state(),
             })
@@ -507,6 +508,15 @@ class CommandServer:
                 except (KeyError, TypeError, ValueError) as e:
                     return {"ok": False, "error": f"Need numeric engage_delay_s: {e}"}
                 self._mc.set_auto_follow_engage_delay(seconds)
+                self._persist_state()
+                return {"ok": True, "auto_follow": self._mc.get_auto_follow_status()}
+
+            elif cmd == "auto_follow_set_exit_confirm":
+                try:
+                    seconds = float(msg["exit_confirm_s"])
+                    self._mc.set_auto_follow_exit_confirm(seconds)
+                except (KeyError, TypeError, ValueError) as e:
+                    return {"ok": False, "error": f"Need exit_confirm_s in 0-10 s: {e}"}
                 self._persist_state()
                 return {"ok": True, "auto_follow": self._mc.get_auto_follow_status()}
 
