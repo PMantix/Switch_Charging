@@ -1,30 +1,3 @@
-## PENDING DEPLOY — read first, then delete this section
-
-Commit 8d94dba (coin-cell mode, 2026-10-12) changed
-`server/command_server.py` (new `zero_current` command) and was written
-on a machine with no network access to the Pis. **It is not deployed.**
-
-When this repo is pulled on a machine that can reach the Pis, tell the
-user and offer to deploy:
-
-1. User runs `/deploy <pi-host>` for each Pi (SW1, SW2, …). The skill is
-   user-invoked only. Only `server/` changed: **no firmware, no
-   BOOTSEL flash.**
-2. Verify on each Pi: the log shows "Server ready — listening on port 5555",
-   then a raw request
-   `{"cmd": "zero_current", "measured_a": [0, 0, 0, 0]}` to port 5555
-   returns `"ok": true`. It folds a zero residual, so offsets are
-   unchanged. The old server answers with an unknown-command error.
-3. Optional on-hardware check: `python -m tui --coincell`, press `i`
-   (idle, cells disconnected), then `z`. The current traces should settle
-   at ~0 µA. A held `<` / `>` should step coarser above 5 mA; this was
-   only verified with simulated key repeat.
-
-Until deployed, everything in coin-cell mode works except the `z` key,
-which silently does nothing against the old server.
-
-Once every Pi is deployed, delete this section and commit.
-
 ## Delegation triggers — this repo
 
 Auto-delegate to a subagent for these workflows; they reliably blow
