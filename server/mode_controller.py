@@ -1,7 +1,8 @@
 """
 Switching Circuit V2 - Mode Controller.
 
-State machine with five modes: IDLE, CHARGE, DISCHARGE, PULSE_CHARGE, DEBUG.
+State machine with six modes: IDLE, CHARGE, DISCHARGE, PULSE_CHARGE, DEBUG,
+MEASURE (held state + precision sensing, server/measure.py).
 Every transition enforces a dead-time interlock (all-off gap) to prevent
 shoot-through.  All public methods are thread-safe.
 
@@ -22,6 +23,7 @@ from time import sleep
 from server.auto_follow import ALLOWED_TARGET_MODES, AutoFollow
 from server.config import DEAD_TIME
 from server.freq_sweep import FreqSweep
+from server.measure import CONFIGS as MEASURE_CONFIGS, MeasureSession, config_for_fets
 from server.schedule_monitor import ScheduleMonitor
 
 log = logging.getLogger(__name__)
@@ -33,6 +35,7 @@ class Mode(enum.Enum):
     DISCHARGE = "discharge"
     PULSE_CHARGE = "pulse_charge"
     DEBUG = "debug"
+    MEASURE = "measure"
 
 
 class ModeController:
@@ -44,6 +47,12 @@ class ModeController:
         self._lock = threading.Lock()
         self._mode = Mode.IDLE
         self._loaded_schedule = None
+
+        # Measurement mode: held FET configuration + precision sensor
+        # profile + per-frame log. Options apply at the next entry.
+        self._measure = MeasureSession(gpio_driver)
+        self._measure_opts = {}
+        self._mode_before_measure = Mode.IDLE
 
         # Per-cycle frequency sweep, consulted by auto-follow at each
         # charge onset. Off until configured and enabled.
@@ -135,7 +144,9 @@ class ModeController:
                 or (prev in (Mode.CHARGE, Mode.PULSE_CHARGE) and mode == Mode.DISCHARGE)
             )
 
-            if skip_dead:
+            if mode == Mode.MEASURE or prev == Mode.MEASURE:
+                self._measure_transition_locked(prev, mode)
+            elif skip_dead:
                 # Seamless: go directly from current FET state to new
                 # state without any all-off intermediate.  Uses live
                 # firmware commands (E, Y) that don't halt the timer
@@ -185,6 +196,36 @@ class ModeController:
             self._mode = mode
             return self._mode
 
+    def _measure_transition_locked(self, prev, mode):
+        """Enter or leave MEASURE without opening the cycler circuit when
+        avoidable: from pass-through the session starts in ``pass`` (FETs
+        unchanged); from switching the engine has to stop first (H = all
+        off, one dead time), so start the measurement during a rest."""
+        if mode == Mode.MEASURE:
+            if prev in (Mode.CHARGE, Mode.PULSE_CHARGE):
+                self._engine.pause()
+                sleep(DEAD_TIME)
+                initial = "open"
+            elif prev == Mode.DISCHARGE:
+                self._engine.pause_silent()
+                initial = "pass"
+            else:
+                initial = config_for_fets(self._gpio.get_fet_states()) or "open"
+            self._mode_before_measure = prev
+            self._measure.start(initial, **self._measure_opts)
+            return
+        # leaving MEASURE
+        self._measure.stop()
+        if mode == Mode.DISCHARGE:
+            self._gpio.all_on()            # superset of every config: no gap
+        elif mode in (Mode.CHARGE, Mode.PULSE_CHARGE):
+            self._engine.set_pulse_mode(mode == Mode.PULSE_CHARGE)
+            self._engine.resume()
+        elif mode == Mode.IDLE:
+            self._gpio.all_off()
+        elif mode == Mode.DEBUG:
+            self._debug_step = -1
+
     def _reapply_mode(self):
         """Re-drive the FETs for the current mode after an RP2040 reconnect.
 
@@ -205,6 +246,8 @@ class ModeController:
                 self._gpio.all_off()
             elif mode == Mode.DEBUG:
                 self._gpio.apply_state(tuple(self._gpio.get_fet_states()))
+            elif mode == Mode.MEASURE:
+                self._gpio.apply_state(MEASURE_CONFIGS[self._measure.config or "open"])
         log.warning("Re-applied mode %s after RP2040 reconnect", mode.value)
 
     # -- schedule management -------------------------------------------------
@@ -261,6 +304,48 @@ class ModeController:
 
     def get_freq_sweep(self) -> FreqSweep:
         return self._freq_sweep
+
+    # -- measurement mode ----------------------------------------------------
+
+    def set_measure_profile(self, avg=None, bus_every=None, sensor_hz=None):
+        """Sensor profile for the next MEASURE entry (None = config default)."""
+        if self.get_mode() == Mode.MEASURE:
+            raise ValueError("leave measure mode before changing its profile")
+        opts = {"avg": avg, "bus_every": bus_every, "sensor_hz": sensor_hz}
+        self._measure_opts = {k: v for k, v in opts.items() if v is not None}
+        return dict(self._measure_opts)
+
+    def measure_set(self, config):
+        with self._lock:
+            if self._mode != Mode.MEASURE:
+                raise ValueError("measure_set only available in measure mode")
+            return self._measure.set_config(config)
+
+    def measure_mark(self, label):
+        return self._measure.mark(label)
+
+    def measure_stats(self, settle_s=0.0):
+        return self._measure.stats(settle_s)
+
+    def measure_reset_stats(self):
+        self._measure.reset_stats()
+
+    def get_measure_status(self):
+        st = self._measure.status()
+        st["next_profile"] = dict(self._measure_opts)
+        return st
+
+    def on_sensor_frame(self, data, sample_pi_s, fw_ts_us, seq):
+        """Per-frame hook from the GPIO reader thread (via the command
+        server). Cheap no-op unless MEASURE is active."""
+        if self._measure.active:
+            self._measure.on_frame(data, sample_pi_s, fw_ts_us, seq)
+
+    def mode_to_persist(self):
+        """MEASURE is never restored after a power cycle: persist the mode
+        the board was in before the measurement (normally pass-through)."""
+        with self._lock:
+            return self._mode_before_measure if self._mode == Mode.MEASURE else self._mode
 
     # -- debug helpers -------------------------------------------------------
 
@@ -328,6 +413,8 @@ class ModeController:
         }
         if mode == Mode.DEBUG:
             status["debug_step"] = debug_step
+        if mode == Mode.MEASURE:
+            status["measure"] = self._measure.status()
         status["auto_follow"] = self._auto_follow.get_status()
         status["freq_sweep"] = self._freq_sweep.get_status()
         status["schedule_monitor"] = self._schedule_monitor.get_status()

@@ -150,6 +150,16 @@ AUTO_FOLLOW_PAUSE_EVERY_LIMITS = (1.0, 600.0)    # s
 AUTO_FOLLOW_PAUSE_LIMITS = (0.05, 10.0)          # s, and always shorter than the interval
 
 # ---------------------------------------------------------------------------
+# Measurement mode (server/measure.py): held state, precision sensing
+# ---------------------------------------------------------------------------
+# AVG 64 at 332 us shunt + 332 us bus conversions = ~42.5 ms per sample,
+# so the stream tops out near 23 Hz with the bus read on every sample.
+MEASURE_INA226_AVG = 64
+MEASURE_BUS_EVERY = 1
+MEASURE_SENSOR_HZ = 20.0
+MEASURE_LOG_DIR = "~/measure_logs"
+
+# ---------------------------------------------------------------------------
 # Schedule (loaded for monitoring; see schedule_monitor.py)
 # ---------------------------------------------------------------------------
 AUTO_SCHEDULE_DIR = "schedules"  # default directory for schedule files

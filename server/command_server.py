@@ -93,7 +93,7 @@ class CommandServer:
             af = self._mc.get_auto_follow_status()
             profile = self._mc._gpio.get_sensor_profile() or {}
             save_state({
-                "mode": self._mc.get_mode().value,
+                "mode": self._mc.mode_to_persist().value,
                 "frequency": engine_state["frequency"],
                 "sequence": engine_state["sequence"],
                 "sensor_rate": self._mc._gpio.get_sensor_rate(),
@@ -274,6 +274,30 @@ class CommandServer:
                     return {"ok": False, "error": "Missing 'index' or 'on' field"}
                 self._mc.set_fet(int(index), bool(on))
                 return {"ok": True, "fet_states": self._mc.get_status()["fet_states"]}
+
+            elif cmd == "measure_status":
+                return {"ok": True, **self._mc.get_measure_status()}
+
+            elif cmd == "measure_set":
+                config = msg.get("config")
+                if config is None:
+                    return {"ok": False, "error": "Missing 'config' field"}
+                return {"ok": True, **self._mc.measure_set(config)}
+
+            elif cmd == "measure_mark":
+                return {"ok": True, **self._mc.measure_mark(msg.get("label", ""))}
+
+            elif cmd == "measure_stats":
+                return {"ok": True, **self._mc.measure_stats(float(msg.get("settle_s", 0.0)))}
+
+            elif cmd == "measure_reset_stats":
+                self._mc.measure_reset_stats()
+                return {"ok": True}
+
+            elif cmd == "measure_set_profile":
+                opts = self._mc.set_measure_profile(
+                    avg=msg.get("avg"), bus_every=msg.get("bus_every"), sensor_hz=msg.get("sensor_hz"))
+                return {"ok": True, "next_profile": opts}
 
             elif cmd == "debug_step":
                 step = self._mc.debug_step()
@@ -666,6 +690,10 @@ class CommandServer:
         via mode_controller to pick up mode / sequence / step / fet_states,
         which change independently of the sensor cadence.
         """
+        try:
+            self._mc.on_sensor_frame(sensor_data, sample_pi_s, fw_ts_us, seq)
+        except Exception:
+            log.exception("measure frame hook failed")
         if not self._recorder.is_recording:
             return
         try:
