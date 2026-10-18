@@ -158,6 +158,8 @@ MEASURE_INA226_AVG = 64
 MEASURE_BUS_EVERY = 1
 MEASURE_SENSOR_HZ = 20.0
 MEASURE_LOG_DIR = "~/measure_logs"
+# Live mean / s.d. in the status broadcast (for the TUI) skip this long after each config change
+MEASURE_LIVE_SETTLE_S = 1.0
 
 # ---------------------------------------------------------------------------
 # Schedule (loaded for monitoring; see schedule_monitor.py)

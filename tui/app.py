@@ -34,6 +34,7 @@ from tui.widgets.right_panel import RightPanel
 from tui.widgets.sensor_plot import SensorPlot
 from tui.widgets.auto_panel import AutoPanel
 from tui.widgets.sweep_panel import SweepPanel, SweepScreen
+from tui.widgets.measure_panel import KEY_TO_CONFIG, MeasurePanel
 from tui.widgets.connection_bar import ConnectionBar
 from tui.widgets.mascot import Mascot
 from tui.widgets.schedule_screen import SchedulePickerScreen, SchedulePreviewScreen
@@ -338,7 +339,14 @@ class HelpScreen(ModalScreen[None]):
                 "            > pulse > debug)\n\n"
                 "[bold white]MODE[/]\n"
                 "  [bold]c[/]  Charge    [bold]i[/]  Idle      [bold]x[/]  Discharge\n"
-                "  [bold]p[/]  Pulse     [bold]g[/]  Debug\n\n"
+                "  [bold]p[/]  Pulse     [bold]g[/]  Debug     [bold]n[/]  Measure on/off\n\n"
+                "[bold white]MEASURE[/]  [dim](held state, precision sensing, logged)[/]\n"
+                "  [bold]n[/]         Enter / leave (leaves to pass-through)\n"
+                "  [bold]1-4[/]       Hold pair +A/-B, +A/-A, +B/-A, +B/-B\n"
+                "  [bold]5 / 6[/]     Pass-through / open (open = no current!)\n"
+                "  [bold]t[/]         Write a marker into the board's log\n"
+                "            [dim]Live mean/s.d. per sensor in the right column;\n"
+                "            log in ~/measure_logs on the Pi[/]\n\n"
                 "[bold white]FREQUENCY[/]\n"
                 "  [bold]= / -[/]     +/- 0.1 Hz    [bold]w / s[/]  +/- 0.1 Hz\n"
                 "  [bold]e / d[/]     +/- 1.0 Hz    [bold]W / S[/]  +/- 10 Hz\n\n"
@@ -363,6 +371,9 @@ class HelpScreen(ModalScreen[None]):
                 "  [bold], / .[/]     I_enter -/+ 1 mA   [dim](0.1 mA coin-cell)[/]\n"
                 "  [bold]; / '[/]     I_exit -/+ 0.5 mA  [dim](0.05 mA coin-cell)[/]\n"
                 "  [bold]< / >[/]     CC setpoint -/+  [dim](coin-cell: 0.1 mA)[/]\n"
+                "  [bold]o[/]         Pauses: off > 0.5 s/15 s > 0.5 s/30 s >\n"
+                "            1 s/15 s > 1 s/60 s (brief pass-through\n"
+                "            while switching)\n"
                 "            [dim]also sets I_enter/I_exit to 35% / 15% of it[/]\n\n"
                 "[bold white]FREQUENCY SWEEP[/]  [dim](Tab to view)[/]\n"
                 "  [bold]f[/]         Edit the sweep: steps the switching\n"
@@ -585,6 +596,9 @@ class SwitchingCircuitApp(App):
         Binding("p", "mode_pulse", "Pulse", show=False),
         Binding("r", "reconnect", "Reconnect", show=False),
         Binding("g", "mode_debug", "Debug", show=False),
+        Binding("n", "measure_toggle", "Measure", show=False),
+        Binding("t", "measure_mark", "Mark", show=False),
+        Binding("o", "auto_follow_pause_cycle", "Pauses", show=False),
         Binding("=", "freq_up_fine", "+0.1Hz", show=False),
         Binding("-", "freq_down_fine", "-0.1Hz", show=False),
         Binding("*", "sensor_rate_up", "Sensor+", show=False),
@@ -661,6 +675,8 @@ class SwitchingCircuitApp(App):
         self._latest_auto_follow: dict = {}  # mirror of last auto_follow status
         self._latest_freq_sweep: dict = {}   # mirror of last freq_sweep status
         self._showing_sweep_panel = False    # right column: sweep view (Tab)
+        self._showing_measure_panel = False  # right column: measure view (automatic in MEASURE)
+        self._measure_marks = 0
         self._link_stale = False  # Pi reports its RP2040 link down / sensor data frozen
         self._probe = LatencyProbe()
         self._offset_worker_started = False
@@ -698,6 +714,7 @@ class SwitchingCircuitApp(App):
                 yield RightPanel(id="right-panel")
                 yield AutoPanel(id="auto-panel", classes="hidden")
                 yield SweepPanel(id="sweep-panel", classes="hidden")
+                yield MeasurePanel(id="measure-panel", classes="hidden")
         yield Footer()
 
     # -- Lifecycle -----------------------------------------------------------
@@ -1042,9 +1059,25 @@ class SwitchingCircuitApp(App):
             schedule_loaded = bool(monitor_data.get("loaded"))
             conn_bar.update_auto_status(monitor_data if schedule_loaded else {})
 
+            # Measurement mode takes over the right column while it lasts.
+            meas_panel = self.query_one("#measure-panel", MeasurePanel)
+            if mode == "measure":
+                meas_panel.measure = data.get("measure") or {}
+                meas_panel.coincell = bool(self._coincell)
+                if not self._showing_measure_panel:
+                    self._showing_measure_panel = True
+                    for w in (rpanel, auto_panel, self.query_one("#sweep-panel", SweepPanel)):
+                        w.add_class("hidden")
+                    meas_panel.remove_class("hidden")
+            elif self._showing_measure_panel:
+                self._showing_measure_panel = False
+                self._showing_auto_panel = self._showing_sweep_panel = False
+                meas_panel.add_class("hidden")
+                rpanel.remove_class("hidden")
+
             # Auto-switch to the monitor when a schedule loads, unless the
-            # user has the sweep view open.
-            if self._showing_sweep_panel:
+            # user has the sweep or measure view open.
+            if self._showing_sweep_panel or self._showing_measure_panel:
                 pass
             elif schedule_loaded and not self._showing_auto_panel:
                 self._showing_auto_panel = True
@@ -1303,10 +1336,17 @@ class SwitchingCircuitApp(App):
             self.notify(f"Failed to load schedule: {err}", title="Error", severity="error")
 
     def action_toggle_right_panel(self) -> None:
-        """Cycle the right column: Status -> Schedule monitor -> Sweep."""
+        """Cycle the right column: Status -> Schedule monitor -> Sweep.
+        In measurement mode: Measure <-> Status."""
         rpanel = self.query_one("#right-panel", RightPanel)
         auto_panel = self.query_one("#auto-panel", AutoPanel)
         sweep_panel = self.query_one("#sweep-panel", SweepPanel)
+        if self._showing_measure_panel:
+            meas_panel = self.query_one("#measure-panel", MeasurePanel)
+            show_meas = meas_panel.has_class("hidden")
+            meas_panel.set_class(not show_meas, "hidden")
+            rpanel.set_class(show_meas, "hidden")
+            return
 
         if self._showing_sweep_panel:
             view = "status"
@@ -1346,34 +1386,74 @@ class SwitchingCircuitApp(App):
         if self._client and self._client.connection_state == ConnectionState.CONNECTED:
             self._client.send_async({"cmd": "set_sequence", "sequence": seq})
 
+    def _measure_set(self, key: str) -> bool:
+        """In measurement mode the digit keys pick the held configuration."""
+        if self._circuit_mode != "measure":
+            return False
+        if self._client and self._client.connection_state == ConnectionState.CONNECTED:
+            self._client.send_async({"cmd": "measure_set", "config": KEY_TO_CONFIG[key]})
+        return True
+
+    def action_measure_toggle(self) -> None:
+        if self._circuit_mode == "measure":
+            self._send_mode("discharge")
+            self.notify("Leaving measurement mode: pass-through, sensor profile restored", title="Measure")
+            return
+        if self._circuit_mode in ("charge", "pulse_charge"):
+            self.notify("Entering from switching opens the circuit for ~2 ms: do it during a cycler rest",
+                        title="Measure", severity="warning")
+        self._send_mode("measure")
+        self.notify("Measurement mode: 1-4 pairs, 5 pass, 6 open, t marker, n leave", title="Measure")
+
+    def action_measure_mark(self) -> None:
+        if self._circuit_mode != "measure":
+            self.notify("Markers only in measurement mode (n)", title="Measure", severity="warning")
+            return
+        self._measure_marks += 1
+        if self._client and self._client.connection_state == ConnectionState.CONNECTED:
+            self._client.send_async({"cmd": "measure_mark", "label": f"TUI mark {self._measure_marks}"})
+        self.notify(f"Marker {self._measure_marks} written", title="Measure")
+
     def action_seq_1(self) -> None:
+        if self._measure_set("1"):
+            return
         if self._circuit_mode == "debug":
             self._toggle_fet(0)
         else:
             self._send_sequence(0)
 
     def action_seq_2(self) -> None:
+        if self._measure_set("2"):
+            return
         if self._circuit_mode == "debug":
             self._toggle_fet(1)
         else:
             self._send_sequence(1)
 
     def action_seq_3(self) -> None:
+        if self._measure_set("3"):
+            return
         if self._circuit_mode == "debug":
             self._toggle_fet(2)
         else:
             self._send_sequence(2)
 
     def action_seq_4(self) -> None:
+        if self._measure_set("4"):
+            return
         if self._circuit_mode == "debug":
             self._toggle_fet(3)
         else:
             self._send_sequence(3)
 
     def action_seq_5(self) -> None:
+        if self._measure_set("5"):
+            return
         self._send_sequence(4)
 
     def action_seq_6(self) -> None:
+        if self._measure_set("6"):
+            return
         self._send_sequence(5)
 
     def action_seq_7(self) -> None:
@@ -1973,6 +2053,24 @@ class SwitchingCircuitApp(App):
     def action_auto_follow_toggle(self) -> None:
         new = not bool(self._latest_auto_follow.get("enabled", False))
         self._send_auto_follow({"cmd": "auto_follow_set_enabled", "enabled": new})
+
+    PAUSE_PRESETS = [(0.0, 0.0), (15.0, 0.5), (30.0, 0.5), (15.0, 1.0), (60.0, 1.0)]   # (every s, pause s)
+
+    def action_auto_follow_pause_cycle(self) -> None:
+        if "pause_every_s" not in self._latest_auto_follow:
+            self.notify("This Pi's server has no pause option - deploy the latest server code.",
+                        title="Pauses", severity="warning")
+            return
+        cur = (float(self._latest_auto_follow.get("pause_every_s") or 0.0),
+               float(self._latest_auto_follow.get("pause_s") or 0.0))
+        try:
+            i = self.PAUSE_PRESETS.index(cur)
+        except ValueError:
+            i = -1
+        every, length = self.PAUSE_PRESETS[(i + 1) % len(self.PAUSE_PRESETS)]
+        self._send_auto_follow({"cmd": "auto_follow_set_pause", "pause_every_s": every, "pause_s": length})
+        self.notify("Pauses off" if not every else f"Pass-through {length:g} s every {every:g} s while switching",
+                    title="Pauses")
 
     def action_auto_follow_cycle_target(self) -> None:
         cur = self._latest_auto_follow.get("target_mode", "charge")

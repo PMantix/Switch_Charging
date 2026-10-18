@@ -48,7 +48,7 @@ from time import monotonic
 
 from server.config import (
     STATE_DEFS, MEASURE_INA226_AVG, MEASURE_BUS_EVERY, MEASURE_SENSOR_HZ,
-    MEASURE_LOG_DIR,
+    MEASURE_LOG_DIR, MEASURE_LIVE_SETTLE_S,
 )
 
 log = logging.getLogger(__name__)
@@ -89,6 +89,30 @@ def config_for_fets(fets) -> str | None:
 _WINDOW_MAX = 50_000          # frames kept for stats() (~40 min at the precision rate)
 
 
+class _Running:
+    """Welford mean / variance for the 8 channels, O(1) per frame, so the
+    status broadcast (30 Hz) can carry live statistics."""
+    __slots__ = ("n", "mean", "m2")
+
+    def __init__(self):
+        self.n, self.mean, self.m2 = 0, [0.0] * 8, [0.0] * 8
+
+    def add(self, vals):
+        self.n += 1
+        for i, x in enumerate(vals):
+            d = x - self.mean[i]
+            self.mean[i] += d / self.n
+            self.m2[i] += d * (x - self.mean[i])
+
+    def summary(self):
+        out = {"n": self.n}
+        for j, s in enumerate(SENSORS):
+            for q, i in (("v", 2 * j), ("i", 2 * j + 1)):
+                sd = math.sqrt(self.m2[i] / (self.n - 1)) if self.n > 1 else None
+                out[f"{s}_{q}"] = [self.mean[i] if self.n else None, sd]
+        return out
+
+
 def _mean_sd(xs):
     n = len(xs)
     if n == 0:
@@ -119,6 +143,7 @@ class MeasureSession:
         self._markers = 0
         self._win = []            # (t, (P1v, P1i, P2v, P2i, N1v, N1i, N2v, N2i)) since the window start
         self._win_start = 0.0
+        self._live = _Running()   # same window, after MEASURE_LIVE_SETTLE_S, for the status broadcast
 
     # -- lifecycle -------------------------------------------------------
 
@@ -233,6 +258,8 @@ class MeasureSession:
                                       + [f"{v:.7f}" for v in vals])
             if sample_pi_s >= self._win_start and len(self._win) < _WINDOW_MAX:
                 self._win.append((sample_pi_s, tuple(vals)))
+            if sample_pi_s >= self._win_start + MEASURE_LIVE_SETTLE_S:
+                self._live.add(vals)
 
     # -- status ----------------------------------------------------------
 
@@ -250,12 +277,15 @@ class MeasureSession:
             "log": str(self._path) if self._path else None,
             "frames": self._frames,
             "markers": self._markers,
+            "live_settle_s": MEASURE_LIVE_SETTLE_S,
+            "live": self._live.summary() if self.active else None,
         }
 
     # -- internals -------------------------------------------------------
 
     def _reset_window(self):
         self._win = []
+        self._live = _Running()
         self._win_start = self._clock()
 
     def _read_profile(self):

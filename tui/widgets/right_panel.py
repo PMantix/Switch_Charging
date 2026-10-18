@@ -24,6 +24,7 @@ MODE_STYLES = {
     "discharge": "bold yellow",
     "pulse_charge": "bold magenta",
     "debug": "bold cyan",
+    "measure": "bold magenta",
 }
 
 MODE_LABELS = {
@@ -32,6 +33,7 @@ MODE_LABELS = {
     "discharge": "DISCHARGE",
     "pulse_charge": "PULSE",
     "debug": "DEBUG",
+    "measure": "MEASURE",
 }
 
 MODE_KEYS = {
@@ -40,6 +42,7 @@ MODE_KEYS = {
     "discharge": "x",
     "pulse_charge": "p",
     "debug": "g",
+    "measure": "n",
 }
 
 
@@ -94,6 +97,7 @@ class RightPanel(Widget):
             round(af.get("avg_current_a", 0.0), 4),
             af.get("engage_delay_s"),
             af.get("engage_pending_s"),
+            af.get("pause_every_s"), af.get("pause_s"), af.get("in_pause"), af.get("pauses_this_charge"),
         )
         key = (self.mode, self.sequence, self.frequency, self.step,
                self.connected, self.conn_status, self.link_down,
@@ -152,7 +156,7 @@ class RightPanel(Widget):
         t.append(" MODE", style="bold cyan underline")
         t.append("\n\n")
 
-        for m in ["idle", "charge", "discharge", "pulse_charge", "debug"]:
+        for m in ["idle", "charge", "discharge", "pulse_charge", "debug", "measure"]:
             sel = (m == self.mode)
             radio = "\u25cf" if sel else "\u25cb"
             style = MODE_STYLES.get(m, "white")
@@ -303,12 +307,27 @@ class RightPanel(Widget):
         t.append(" f ", style="bold white on dark_blue")
         t.append(")\n", style="dim")
 
+        if "pause_every_s" in af:            # servers older than the pause option don't report it
+            every, length = af.get("pause_every_s") or 0.0, af.get("pause_s") or 0.0
+            t.append(" Pauses ", style="dim")
+            if every:
+                t.append(f" {length:g} s / {every:g} s ", style="bold white")
+                cnt = af.get("pauses_this_charge") or 0
+                if cnt:
+                    t.append(f"x{cnt} ", style="dim")
+            else:
+                t.append("  off     ", style="dim")
+            t.append(" o ", style="bold white on dark_blue")
+            t.append("\n")
+
         t.append(" Live i ", style="dim")
         t.append(f" {avg_i_ma:+6.2f} mA\n", style="white")
 
         t.append(" State  ", style="dim")
         if not enabled:
             t.append(" off\n", style="dim")
+        elif active and af.get("in_pause"):
+            t.append(" PAUSE (pass-through)\n", style="bold yellow")
         elif active:
             t.append(" SWITCHING\n", style="bold green")
         elif af.get("engage_pending_s") is not None:

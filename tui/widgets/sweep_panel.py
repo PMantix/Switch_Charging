@@ -38,10 +38,22 @@ _MODE_LABEL = {"charge": "charge", "pulse_charge": "pulse", "passthrough": "pass
 
 
 def parse_entry(text: str) -> dict:
-    """'300' / '500p' / 'pass' -> normalized entry dict. Raises ValueError."""
+    """'300' / '500p' / 'pass' / '307~15/0.5' -> normalized entry dict. Raises ValueError.
+
+    A '~every/pause' suffix adds intermittent pass-through for that cycle:
+    '307~15/0.5' = 307 Hz with a 0.5 s pass-through pause every 15 s."""
     s = text.strip().lower()
     if not s:
         raise ValueError("empty entry")
+    pause = None
+    if "~" in s:
+        s, _, p = s.partition("~")
+        try:
+            every_s, pause_s = (float(x) for x in p.split("/"))
+        except ValueError:
+            raise ValueError(f"{text.strip()!r}: pauses are written ~every/pause, e.g. 307~15/0.5")
+        pause = {"pause_every_s": every_s, "pause_s": pause_s}
+        s = s.strip()
     if s in ("pass", "passthrough", "-"):
         return normalize_entry({"mode": "passthrough"})
     mode = None
@@ -57,6 +69,8 @@ def parse_entry(text: str) -> dict:
     entry = {"hz": hz}
     if mode:
         entry["mode"] = mode
+    if pause:
+        entry.update(pause)
     return normalize_entry(entry)
 
 
@@ -74,7 +88,10 @@ def format_entry(entry: dict, default_mode: str = "charge") -> str:
         return "pass"
     hz = entry.get("hz")
     hz_s = f"{hz:g} Hz" if hz is not None else "? Hz"
-    return f"{hz_s} pulse" if mode == "pulse_charge" else hz_s
+    out = f"{hz_s} pulse" if mode == "pulse_charge" else hz_s
+    if entry.get("pause_every_s"):
+        out += f" · pause {entry['pause_s']:g}/{entry['pause_every_s']:g} s"
+    return out
 
 
 def render_entry_list(t: Text, fs: dict) -> None:

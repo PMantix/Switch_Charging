@@ -80,3 +80,25 @@ its − tab, with equal leads. In every pair configuration, the two driven senso
 In `pass`, the split shows the board's own +A/+B path imbalance.
 
 Manual work: `measure_run.py hold pair3`, then `stats --settle 2`, then `exit`.
+
+## From the TUI
+
+| key | what it does |
+|---|---|
+| `n` | Enter measurement mode, or leave it to pass-through. The right column switches to the MEASURE panel; Tab toggles between that panel and the status panel. |
+| `1`–`4` | Hold pair1 … pair4 (+A/−B, +A/−A, +B/−A, +B/−B). |
+| `5` | Hold pass-through. |
+| `6` | Open: breaks the circuit, so use it only at zero current. |
+| `t` | Write a marker (`TUI mark N`) into the board's log. |
+| `o` | Cycle the pause presets: off → 0.5 s every 15 s → 0.5 s/30 s → 1 s/15 s → 1 s/60 s. |
+
+The panel shows:
+
+- the held configuration and how long it has been held;
+- the sensor profile;
+- live mean and s.d. of each sensor's current and voltage since the last change, skipping the first 1 s
+  (`MEASURE_LIVE_SETTLE_S`);
+- the log file name, with its frame and marker counts.
+
+**Pauses in the sweep editor** (`f`): write an entry as `307~15/0.5`, meaning 307 Hz with a 0.5 s pass-through every
+15 s, for that cycle only.

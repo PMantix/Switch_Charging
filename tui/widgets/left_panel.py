@@ -59,6 +59,12 @@ class LeftPanel(Widget):
                 (" ,/. ", f"I_enter -/+{enter_step}"),
                 (" ;/' ", f"I_exit -/+{exit_step}"),
                 (" </> ", "CC set 0-100mA" if self.coincell else "CC setpoint"),
+                ("  o  ", "Pauses preset"),
+            ]),
+            ("MEASURE", [
+                ("  n  ", "Enter / leave"),
+                (" 1-6 ", "Pair / pass / open"),
+                ("  t  ", "Marker in log"),
             ]),
             ("FREQ SWEEP", [
                 ("  f  ", "Edit sweep"),
