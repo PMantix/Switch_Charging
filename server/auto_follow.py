@@ -34,6 +34,15 @@ frequencies the four sensors catch different phases, so it sags for a
 tick or two at full current. A reversal to discharge (i < -i_exit) is
 not debounced: it exits on the next tick, as the direction-aware
 contract requires.
+
+Pauses (default off): while engaged, every pause_every_s the board drops
+to pass-through ("discharge", all FETs on) for pause_s and then resumes
+the mode it engaged with. The cycler current keeps flowing through the
+pause, so the exit logic is unaffected and a pause is never a new
+engagement (the sweep does not see it as a re-engage). The settings come
+from the sweep entry when it has them, otherwise from set_pause(). Added
+to test whether the brief pass-through gaps the old single-reading exit
+produced at 307 Hz (about every 15 s, under 1 s each) change CE.
 """
 
 from __future__ import annotations
@@ -46,6 +55,8 @@ from typing import Callable, Optional
 
 from server.config import (
     AUTO_FOLLOW_EXIT_CONFIRM_S,
+    AUTO_FOLLOW_PAUSE_EVERY_LIMITS,
+    AUTO_FOLLOW_PAUSE_LIMITS,
     AUTO_FOLLOW_I_ENTER_A,
     AUTO_FOLLOW_I_EXIT_A,
     AUTO_FOLLOW_LOOP_HZ,
@@ -56,6 +67,21 @@ log = logging.getLogger(__name__)
 
 
 ALLOWED_TARGET_MODES = ("charge", "pulse_charge")
+
+
+def validate_pause(every_s, pause_s) -> tuple:
+    """(every_s, pause_s) as floats; every_s = 0 means off (pause_s then ignored). Raises ValueError."""
+    every_s = float(every_s or 0.0)
+    pause_s = float(pause_s or 0.0)
+    if every_s == 0.0:
+        return 0.0, 0.0
+    lo, hi = AUTO_FOLLOW_PAUSE_EVERY_LIMITS
+    if not lo <= every_s <= hi:
+        raise ValueError(f"pause interval must be 0 (off) or {lo:g}-{hi:g} s, got {every_s}")
+    lo, hi = AUTO_FOLLOW_PAUSE_LIMITS
+    if not lo <= pause_s <= hi or pause_s >= every_s:
+        raise ValueError(f"pause length must be {lo:g}-{hi:g} s and shorter than the interval, got {pause_s}")
+    return every_s, pause_s
 
 
 class AutoFollow:
@@ -100,6 +126,13 @@ class AutoFollow:
         self._exit_confirm_s = float(AUTO_FOLLOW_EXIT_CONFIRM_S)
         self._active_i: deque = deque()  # (t, avg_i) while engaged, last exit_confirm_s only
         self._loop_dt = 1.0 / float(loop_hz)
+        self._pause_every_s = 0.0           # board-wide pause setting (0 = off)
+        self._pause_s = 0.0
+        self._pause_cfg: Optional[tuple] = None   # (every, length) for the current engagement
+        self._engaged_mode: Optional[str] = None  # the switching mode a pause resumes to
+        self._next_pause: Optional[float] = None
+        self._pause_until: Optional[float] = None
+        self._pauses = 0                    # pauses in the current engagement
 
         self._loop_period = 1.0 / float(loop_hz)
         self._thread: Optional[threading.Thread] = None
@@ -184,6 +217,14 @@ class AutoFollow:
             self._active_i.clear()
         log.info("AutoFollow: exit confirm=%.2f s", seconds)
 
+    def set_pause(self, every_s: float, pause_s: float):
+        """Board-wide pause setting, used when the sweep entry has none. every_s = 0 turns pauses off."""
+        every_s, pause_s = validate_pause(every_s, pause_s)
+        with self._lock:
+            self._pause_every_s, self._pause_s = every_s, pause_s
+        log.info("AutoFollow: pauses %s", "off" if not every_s else
+                 "%.2f s every %.1f s" % (pause_s, every_s))
+
     def set_cc_setpoint(self, amps: float):
         with self._lock:
             self._cc_setpoint_a = max(0.0, float(amps))
@@ -227,6 +268,12 @@ class AutoFollow:
                 "cc_setpoint_a": cc,
                 "engage_delay_s": self._engage_delay_s,
                 "exit_confirm_s": self._exit_confirm_s,
+                "pause_every_s": self._pause_every_s,
+                "pause_s": self._pause_s,
+                # what the current engagement is doing (from the sweep entry or the board setting)
+                "pause_active_cfg": list(self._pause_cfg) if self._pause_cfg else None,
+                "in_pause": self._pause_until is not None,
+                "pauses_this_charge": self._pauses,
                 # Seconds the current has been above i_enter while
                 # waiting out the engage delay (None when not waiting).
                 "engage_pending_s": (
@@ -270,6 +317,7 @@ class AutoFollow:
         avg_v = result.avg_voltage
 
         target = None
+        pause_action = None
         with self._lock:
             self._latest_avg_i = avg_i
             self._latest_avg_v = avg_v
@@ -285,12 +333,16 @@ class AutoFollow:
                     self._is_active = True
                     self._above_since = None
                     self._active_i.clear()
+                    self._clear_pauses()
             elif not self._is_active:
                 self._above_since = None
             elif self._should_exit(avg_i):
                 target = "discharge"
                 self._is_active = False
                 self._active_i.clear()
+                self._clear_pauses()
+            else:
+                pause_action = self._pause_step()
 
         if sweep is not None:
             sweep.observe(avg_i)
@@ -305,9 +357,50 @@ class AutoFollow:
                 if swept is not None:
                     target = swept
 
+        if target is not None and target != "discharge":
+            cfg = sweep.current_pause() if (sweep is not None and sweep.enabled) else None
+            with self._lock:
+                if cfg is None and self._pause_every_s > 0:
+                    cfg = (self._pause_every_s, self._pause_s)
+                self._engaged_mode = target
+                self._pause_cfg = cfg
+                self._next_pause = self._clock() + cfg[0] if cfg else None
+
         if target is not None:
             log.info("AutoFollow: -> %s (i=%.4f A)", target, avg_i)
             self._set_mode(target)
+        elif pause_action == "pause":
+            self._set_mode("discharge")
+            if sweep is not None and sweep.enabled:
+                sweep.log_pause(avg_i, avg_v)
+        elif pause_action is not None:
+            self._set_mode(pause_action)            # resume the engaged mode
+
+    def _clear_pauses(self):
+        """Caller holds the lock."""
+        self._pause_cfg = None
+        self._engaged_mode = None
+        self._next_pause = None
+        self._pause_until = None
+        self._pauses = 0
+
+    def _pause_step(self) -> Optional[str]:
+        """Engaged and staying engaged: start or end a pause? Caller holds the lock.
+        Returns "pause", the mode to resume, or None."""
+        if not self._pause_cfg or self._engaged_mode not in ALLOWED_TARGET_MODES:
+            return None
+        now = self._clock()
+        if self._pause_until is not None:
+            if now >= self._pause_until:
+                self._pause_until = None
+                self._next_pause = now + self._pause_cfg[0]
+                return self._engaged_mode
+            return None
+        if self._next_pause is not None and now >= self._next_pause:
+            self._pause_until = now + self._pause_cfg[1]
+            self._pauses += 1
+            return "pause"
+        return None
 
     def _should_exit(self, avg_i: float) -> bool:
         """Engaged: leave switching? Caller holds the lock.

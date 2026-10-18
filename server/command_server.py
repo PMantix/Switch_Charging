@@ -107,6 +107,8 @@ class CommandServer:
                     "cc_setpoint_a": af.get("cc_setpoint_a"),
                     "engage_delay_s": af.get("engage_delay_s", 0.0),
                     "exit_confirm_s": af.get("exit_confirm_s"),
+                    "pause_every_s": af.get("pause_every_s"),
+                    "pause_s": af.get("pause_s"),
                 },
                 "freq_sweep": self._mc.get_freq_sweep().to_state(),
             })
@@ -508,6 +510,14 @@ class CommandServer:
                 except (KeyError, TypeError, ValueError) as e:
                     return {"ok": False, "error": f"Need numeric engage_delay_s: {e}"}
                 self._mc.set_auto_follow_engage_delay(seconds)
+                self._persist_state()
+                return {"ok": True, "auto_follow": self._mc.get_auto_follow_status()}
+
+            elif cmd == "auto_follow_set_pause":
+                try:
+                    self._mc.set_auto_follow_pause(msg.get("pause_every_s", 0), msg.get("pause_s", 0))
+                except (TypeError, ValueError) as e:
+                    return {"ok": False, "error": f"Bad pause setting: {e}"}
                 self._persist_state()
                 return {"ok": True, "auto_follow": self._mc.get_auto_follow_status()}
 

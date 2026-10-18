@@ -306,5 +306,95 @@ class TestAutoFollowDisabled(unittest.TestCase):
         self.assertFalse(st["enabled"])
 
 
+class TestPauses(unittest.TestCase):
+    """Intermittent pass-through while switching: 0.5 s every 15 s (the gap-test pattern), SW7-style thresholds."""
+
+    DT = 1 / 15
+
+    def setUp(self):
+        self.h = _Harness()
+        self.clock = _Clock()
+        self.af = AutoFollow(self.h.get_sensor, self.h.set_mode,
+                             i_enter_a=0.100, i_exit_a=0.075, clock=self.clock)
+        self.af.set_exit_confirm(1.0)
+        self.af.set_enabled(True)
+        self.h.mode_calls.clear()
+
+    def _run(self, i, seconds):
+        self.h.sensor = _sensor(i)
+        for _ in range(int(round(seconds / self.DT))):
+            self.clock.t += self.DT
+            self.af._tick()
+
+    def test_off_by_default(self):
+        self._run(0.187, 40)
+        self.assertEqual(self.h.mode_calls, ["charge"])
+        self.assertEqual(self.af.get_status()["pauses_this_charge"], 0)
+
+    def test_pause_pattern(self):
+        self.af.set_pause(15.0, 0.5)
+        self._run(0.187, 31.5)   # engaged at t=1 tick: 2nd pause ends at 31.07 s
+        self.assertEqual(self.h.mode_calls, ["charge", "discharge", "charge", "discharge", "charge"])
+        st = self.af.get_status()
+        self.assertEqual(st["pauses_this_charge"], 2)
+        self.assertTrue(st["active"])
+        self.assertFalse(st["in_pause"])
+
+    def test_pause_length(self):
+        self.af.set_pause(15.0, 0.5)
+        self._run(0.187, 15.0 + self.DT)        # first pause just started
+        self.assertTrue(self.af.get_status()["in_pause"])
+        self._run(0.187, 0.4)
+        self.assertTrue(self.af.get_status()["in_pause"])
+        self._run(0.187, 0.2)
+        self.assertFalse(self.af.get_status()["in_pause"])
+
+    def test_pauses_do_not_trip_the_exit(self):
+        self.af.set_pause(15.0, 0.5)
+        self._run(0.187, 120)
+        self.assertTrue(self.af.active)
+        self.assertEqual(self.h.mode_calls.count("charge"), 1 + 7)
+
+    def test_real_stop_during_pause_exits_and_does_not_resume(self):
+        self.af.set_pause(15.0, 2.0)
+        self._run(0.187, 15.2)                  # inside the first pause
+        self._run(0.0, 3.0)
+        self.assertFalse(self.af.active)
+        self.assertNotEqual(self.h.mode_calls[-1], "charge")
+        self.h.mode_calls.clear()
+        self._run(0.0, 20)
+        self.assertEqual(self.h.mode_calls, [])
+
+    def test_reversal_during_pause_exits_next_tick(self):
+        self.af.set_pause(15.0, 2.0)
+        self._run(0.187, 15.2)
+        self.h.mode_calls.clear()
+        self._run(-0.089, self.DT)
+        self.assertEqual(self.h.mode_calls, ["discharge"])
+        self.assertFalse(self.af.active)
+
+    def test_timer_restarts_on_each_engagement(self):
+        self.af.set_pause(15.0, 0.5)
+        self._run(0.187, 10)
+        self._run(-0.089, 1)                    # charge ends before the first pause
+        self.h.mode_calls.clear()
+        self._run(0.187, 10)                    # new charge: no pause before 15 s of engaged time
+        self.assertEqual(self.h.mode_calls, ["charge"])
+
+    def test_turn_off(self):
+        self.af.set_pause(15.0, 0.5)
+        self.af.set_pause(0, 0)
+        self._run(0.187, 40)
+        self.assertEqual(self.h.mode_calls, ["charge"])
+
+    def test_validation(self):
+        for every, length in ((0.5, 0.1), (601, 1), (15, 0.01), (15, 11), (5, 5)):
+            with self.assertRaises(ValueError):
+                self.af.set_pause(every, length)
+        self.af.set_pause(15, 0.5)
+        st = self.af.get_status()
+        self.assertEqual((st["pause_every_s"], st["pause_s"]), (15.0, 0.5))
+
+
 if __name__ == "__main__":
     unittest.main()

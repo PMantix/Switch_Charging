@@ -324,6 +324,8 @@ def main():
                 mc.set_auto_follow_engage_delay(af["engage_delay_s"])
             if af.get("exit_confirm_s") is not None:
                 mc.set_auto_follow_exit_confirm(af["exit_confirm_s"])
+            if af.get("pause_every_s"):
+                mc.set_auto_follow_pause(af["pause_every_s"], af.get("pause_s", 0))
             # Sweep position is restored before auto-follow is enabled, so
             # a restart mid-experiment resumes on the right entry.
             if saved_state.get("freq_sweep"):

@@ -248,6 +248,9 @@ class ModeController:
     def set_auto_follow_exit_confirm(self, seconds: float):
         self._auto_follow.set_exit_confirm(seconds)
 
+    def set_auto_follow_pause(self, every_s: float, pause_s: float):
+        self._auto_follow.set_pause(every_s, pause_s)
+
     def set_auto_follow_target(self, mode: str):
         self._auto_follow.set_target_mode(mode)
 

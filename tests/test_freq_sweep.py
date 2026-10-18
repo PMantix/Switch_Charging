@@ -433,5 +433,64 @@ class TestEngageDelay(unittest.TestCase):
             self.af.set_engage_delay(601)
 
 
+class TestSweepPauses(unittest.TestCase):
+    """Per-entry pauses: the gap test alternates continuous and paused 307 Hz cycles."""
+
+    DT = 1 / 15
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.sweep, self.set_freq, self.clock = _make_sweep(
+            self._tmp.name, entries=[{"hz": 307}, {"hz": 307, "pause_every_s": 15, "pause_s": 0.5}])
+        self.sensor = _sensor(0.0)
+        self.modes = []
+        self.af = AutoFollow(lambda: self.sensor, MagicMock(side_effect=self.modes.append),
+                             i_enter_a=0.100, i_exit_a=0.075, sweep=self.sweep, clock=self.clock)
+        self.af.set_exit_confirm(1.0)
+        self.af.set_enabled(True)
+        self.modes.clear()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, i, seconds):
+        self.sensor = _sensor(i)
+        for _ in range(int(round(seconds / self.DT))):
+            self.clock.t += self.DT
+            self.af._tick()
+
+    def _log(self):
+        with open(Path(self._tmp.name) / "sweep.csv", newline="") as f:
+            return list(csv.DictReader(f))
+
+    def test_entry_normalisation(self):
+        self.assertEqual(normalize_entry({"hz": 307, "pause_every_s": 15, "pause_s": 0.5}),
+                         {"hz": 307.0, "pause_every_s": 15.0, "pause_s": 0.5})
+        with self.assertRaises(ValueError):
+            normalize_entry({"hz": 307, "pause_every_s": 15})
+        with self.assertRaises(ValueError):
+            normalize_entry({"hz": 307, "pause_every_s": 15, "pause_s": 20})
+
+    def test_continuous_then_paused_cycle(self):
+        self._run(0.187, 40)                    # cycle 1: continuous
+        self.assertEqual(self.modes, ["charge"])
+        self._run(-0.089, 15)                   # discharge, confirmed
+        self.modes.clear()
+        self._run(0.187, 40)                    # cycle 2: paused entry
+        self.assertEqual(self.modes, ["charge", "discharge", "charge", "discharge", "charge"])
+        st = self.sweep.get_status()
+        self.assertEqual(st["cycle"], 2)        # pauses never start or re-enter a cycle
+        rows = self._log()
+        self.assertEqual([r["event"] for r in rows], ["cycle_start", "cycle_start", "pause", "pause"])
+        self.assertTrue(all(r["cycle"] == "2" for r in rows if r["event"] == "pause"))
+
+    def test_pause_state_survives_restore(self):
+        state = self.sweep.to_state()
+        self.assertEqual(state["entries"][1]["pause_s"], 0.5)
+        other, _, _ = _make_sweep(self._tmp.name, entries=[10])
+        other.restore(state)
+        self.assertEqual(other.get_status()["entries"][1], {"hz": 307.0, "pause_every_s": 15.0, "pause_s": 0.5})
+
+
 if __name__ == "__main__":
     unittest.main()

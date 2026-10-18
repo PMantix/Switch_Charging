@@ -20,7 +20,11 @@ been seen since the previous onset. Without that, threshold chatter
 (or a current blip) mid-charge would skip entries; instead a re-entry
 in the same charge re-applies the same entry.
 
-Each entry is {"hz": float, "mode": str}. mode is one of "charge" /
+Each entry is {"hz": float, "mode": str} plus, optionally, pauses:
+{"pause_every_s": float, "pause_s": float} makes AutoFollow drop to
+pass-through for pause_s every pause_every_s during that cycle's charge
+(see auto_follow.py); each pause is logged with event "pause", so the
+log's "reengage" rows still count only real drop-outs. mode is one of "charge" /
 "pulse_charge" / "passthrough" and falls back to default_mode; hz is
 required unless the entry is "passthrough" — a non-switching control
 cycle where AutoFollow stays all-on for that whole charge.
@@ -88,6 +92,13 @@ def normalize_entry(entry) -> dict:
         if not MIN_FREQ <= hz <= MAX_FREQ:
             raise ValueError(f"Entry hz must be in [{MIN_FREQ}, {MAX_FREQ}], got {hz}")
         out["hz"] = hz
+    if ("pause_every_s" in entry) != ("pause_s" in entry):
+        raise ValueError(f"Entry needs both pause_every_s and pause_s, or neither: {entry!r}")
+    if "pause_every_s" in entry:
+        from server.auto_follow import validate_pause    # deferred: auto_follow imports this module's users
+        every, length = validate_pause(entry["pause_every_s"], entry["pause_s"])
+        if every:
+            out["pause_every_s"], out["pause_s"] = every, length
     if "hz" not in out and out.get("mode") != "passthrough":
         # A switching entry with no frequency would silently reuse
         # whatever was set last — almost certainly a typo in the list.
@@ -306,6 +317,21 @@ class FreqSweep:
         self._write_log(cycle, idx, mode, hz, event, avg_i, avg_v)
         self._changed()
         return mode
+
+    def current_pause(self) -> Optional[tuple]:
+        """(pause_every_s, pause_s) of the entry applied at the last onset, or None."""
+        with self._lock:
+            if not self._enabled or self._current is None or self._current >= len(self._entries):
+                return None
+            e = self._entries[self._current]
+            return (e["pause_every_s"], e["pause_s"]) if "pause_every_s" in e else None
+
+    def log_pause(self, avg_i: float = 0.0, avg_v: float = 0.0):
+        """One log row per pause (event "pause"), tagged with the current cycle and entry."""
+        with self._lock:
+            la = dict(self._last_applied) if self._last_applied else None
+        if la:
+            self._write_log(la["cycle"], la["index"], la["mode"], la["hz"], "pause", avg_i, avg_v)
 
     # -- status / persistence -----------------------------------------------
 

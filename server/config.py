@@ -144,6 +144,10 @@ AUTO_FOLLOW_EXIT_CONFIRM_S = 1.0  # s — exit needs the MEAN current over this 
                                   # different switching phases and their KCL sum sags for a tick or two
                                   # (SW7 / cell 17, 2026-10: ~85 false exits per 30 min charge).
                                   # Reversal (i < -i_exit) still exits on the next tick. 0 = old behaviour.
+# Intermittent pass-through ("pauses") while switching: every PAUSE_EVERY_S of engaged time, drop to pass-through
+# (all FETs on) for PAUSE_S, then resume the same mode. Off by default; set per board or per sweep entry.
+AUTO_FOLLOW_PAUSE_EVERY_LIMITS = (1.0, 600.0)    # s
+AUTO_FOLLOW_PAUSE_LIMITS = (0.05, 10.0)          # s, and always shorter than the interval
 
 # ---------------------------------------------------------------------------
 # Schedule (loaded for monitoring; see schedule_monitor.py)
