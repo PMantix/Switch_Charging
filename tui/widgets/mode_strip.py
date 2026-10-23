@@ -7,9 +7,9 @@ frequency-map blocks) are configured in other views and are hard to follow from
 the FET pattern alone. This strip summarises, in a few lines no wider than the
 diagram, whichever of them is in force right now:
 
-    FREQ MAP charge 1 of 3 · block 9/28 · 23 Hz · 37 s left
+    FREQ MAP 1/3 · block 9/28 · 23 Hz · 37 s left
        … 1000   10 [  23]  600  200   23  107 …       (window of the block list)
-    PAUSES 0.5 s pass every 15 s · 12 this charge
+    PAUSES 0.5 s pass / 15 s · 12 this charge
     SWEEP · entry 3/6: 307 Hz · next charge: 23 Hz
     AUTO-FOLLOW · waiting for charge current > 0.10 A
 
@@ -27,8 +27,8 @@ from textual.widgets import Static
 
 from tui.widgets.sweep_panel import format_entry
 
-WIDTH = 58          # the diagram is ~60 columns wide
-WINDOW = 8          # blocks shown around the running one
+WIDTH = 55          # = the diagram's width; wider pushes the side-by-side sensor plots into wrapping
+WINDOW = 7          # blocks shown around the running one
 
 
 def _tok(hz: float) -> str:
@@ -65,7 +65,27 @@ def _entry_pos(fs: dict, idx: Optional[int]) -> tuple[int, int]:
     return 0, len(blk)
 
 
+def _crop(t: Text) -> Text:
+    """Keep every line within WIDTH (an ellipsis marks a cut)."""
+    out = Text()
+    for line in t.split("\n", include_separator=True):
+        nl = line.plain.endswith("\n")
+        if nl:
+            line.right_crop(1)
+        if len(line.plain) > WIDTH:
+            line.truncate(WIDTH, overflow="ellipsis")
+        out.append_text(line)
+        if nl:
+            out.append("\n")
+    return out
+
+
 def mode_strip_text(af: Optional[dict], fs: Optional[dict], mode: str = "") -> Text:
+    """The strip's text (each line at most WIDTH), or an empty Text when nothing special is set up."""
+    return _crop(_strip_text(af, fs, mode))
+
+
+def _strip_text(af: Optional[dict], fs: Optional[dict], mode: str = "") -> Text:
     """The strip's text, or an empty Text when no special mode is set up."""
     af, fs = af or {}, fs or {}
     t = Text()
@@ -80,7 +100,7 @@ def mode_strip_text(af: Optional[dict], fs: Optional[dict], mode: str = "") -> T
         k, n = _entry_pos(fs, cur)
         i, hz = af.get("block_index") or 0, af.get("block_hz")
         t.append(" FREQ MAP", style="bold black on cyan")
-        t.append(f" charge {k} of {n} · block {i + 1}/{len(blocks)} · ", style="white")
+        t.append(f" {k}/{n} · block {i + 1}/{len(blocks)} · ", style="white")
         t.append("pass-through" if hz == 0 else f"{hz:g} Hz", style="bold green")
         rem = af.get("block_remaining_s")
         if rem is not None:
@@ -105,7 +125,7 @@ def mode_strip_text(af: Optional[dict], fs: Optional[dict], mode: str = "") -> T
                     else (af.get("pause_every_s"), af.get("pause_s")))
     if af.get("active") and every:
         t.append(" PAUSES", style="bold black on yellow")
-        t.append(f" {pause:g} s pass every {every:g} s", style="white")
+        t.append(f" {pause:g} s pass / {every:g} s", style="white")
         t.append(f" · {af.get('pauses_this_charge') or 0} this charge", style="dim")
         if af.get("in_pause"):
             t.append(" · IN PAUSE", style="bold yellow")
@@ -130,7 +150,7 @@ def mode_strip_text(af: Optional[dict], fs: Optional[dict], mode: str = "") -> T
     if af.get("enabled") and not t.plain:
         t.append(" AUTO-FOLLOW", style="bold black on blue")
         if af.get("active"):
-            t.append(f" switching while charge current flows ({af.get('target_mode', 'charge')})",
+            t.append(f" switching while current flows ({af.get('target_mode', 'charge')})",
                      style="white")
         else:
             ie = af.get("i_enter_a")
@@ -145,10 +165,14 @@ class ModeStrip(Static):
 
     DEFAULT_CSS = """
     ModeStrip {
-        width: 60;
+        width: 55;
         height: auto;
         padding: 0;
         margin-top: 1;
+    }
+    ModeStrip.empty {
+        height: 0;
+        margin-top: 0;
     }
     """
 
@@ -172,5 +196,7 @@ class ModeStrip(Static):
             return
         self._key = key
         t = mode_strip_text(af, fs, mode)
-        self.display = bool(t.plain)
+        # Collapse to zero height rather than display:none: a hidden child makes the
+        # auto-width column it shares with the diagram collapse, diagram and all.
+        self.set_class(not t.plain, "empty")
         self.update(t)
