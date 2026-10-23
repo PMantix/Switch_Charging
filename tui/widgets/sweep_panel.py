@@ -91,7 +91,7 @@ def format_entry(entry: dict, default_mode: str = "charge") -> str:
         n_pass = sum(1 for h, _ in bl if h == 0)
         secs = {s for _, s in bl}
         dur = f"{bl[0][1]:g} s" if len(secs) == 1 else "mixed"
-        return f"freq map: {len(bl)} blocks × {dur} ({n_pass} pass)"
+        return f"freq map {len(bl)} × {dur} ({n_pass} P)"
     hz = entry.get("hz")
     hz_s = f"{hz:g} Hz" if hz is not None else "? Hz"
     out = f"{hz_s} pulse" if mode == "pulse_charge" else hz_s
@@ -100,8 +100,56 @@ def format_entry(entry: dict, default_mode: str = "charge") -> str:
     return out
 
 
-def render_entry_list(t: Text, fs: dict) -> None:
-    """Append the numbered entry list with ▶ running / → next markers."""
+def _block_token(hz: float) -> str:
+    return "P" if hz == 0 else f"{hz:g}"
+
+
+def render_blocks(t: Text, blocks: list, live: Optional[int] = None, per_row: int = 5,
+                  indent: str = "   ") -> None:
+    """Append a freq-map entry's block order, per_row blocks a line (P = pass-through).
+    live: index of the running block -> highlighted, earlier blocks dimmed."""
+    for r in range(0, len(blocks), per_row):
+        t.append(indent + f"{r + 1:>2}│", style="dim")
+        for i in range(r, min(r + per_row, len(blocks))):
+            tok = f"{_block_token(blocks[i][0]):>4}"
+            if live is not None and i == live:
+                style = "bold black on green"
+            elif live is not None and i < live:
+                style = "dim"
+            elif blocks[i][0] == 0:
+                style = "grey62"
+            else:
+                style = "white"
+            t.append(" ")
+            t.append(tok, style=style)
+        t.append("\n")
+
+
+def render_block_status(t: Text, af: Optional[dict], fs: Optional[dict] = None) -> None:
+    """One 'Block:' line from the auto-follow status while frequency blocks run
+    (block count from the running sweep entry)."""
+    af = af or {}
+    if not af.get("blocks_active"):
+        return
+    i, hz = af.get("block_index"), af.get("block_hz")
+    n = None
+    entries = (fs or {}).get("entries") or []
+    cur = (fs or {}).get("current_index")
+    if cur is not None and 0 <= cur < len(entries) and entries[cur].get("blocks"):
+        n = len(entries[cur]["blocks"])
+    t.append(" Block:  ", style="dim")
+    t.append(f"{(i or 0) + 1}{'/' + str(n) if n else ''} ", style="bold white")
+    t.append(("pass-through" if hz == 0 else f"{hz:g} Hz") if hz is not None else "?",
+             style="bold green")
+    rem = af.get("block_remaining_s")
+    if rem is not None:
+        t.append(f" · {rem:.0f} s left", style="white")
+    t.append(f"\n         {af.get('blocks_this_charge') or 0} blocks this charge\n", style="dim")
+
+
+def render_entry_list(t: Text, fs: dict, af: Optional[dict] = None, per_row: int = 5) -> None:
+    """Append the numbered entry list with ▶ running / → next markers. Freq-map entries
+    (blocks) are followed by their block order; the running block is highlighted."""
     entries = fs.get("entries") or []
     if not entries:
         t.append("  (empty — press ", style="dim")
@@ -121,6 +169,11 @@ def render_entry_list(t: Text, fs: dict) -> None:
         t.append(mark, style=style)
         t.append(f"{i + 1:>2}. ", style="dim")
         t.append(f"{format_entry(e, dm)}\n", style=style or "white")
+        if e.get("blocks"):
+            live = None
+            if i == cur and af and af.get("blocks_active"):
+                live = af.get("block_index")
+            render_blocks(t, e["blocks"], live=live, per_row=per_row)
 
 
 class SweepPanel(Widget):
@@ -137,6 +190,7 @@ class SweepPanel(Widget):
     freq_sweep: reactive[dict] = reactive({}, layout=True)
     auto_follow_enabled: reactive[bool] = reactive(False)
     engage_delay_s: reactive[float] = reactive(0.0)
+    auto_follow: reactive[dict] = reactive({}, layout=True)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -147,7 +201,10 @@ class SweepPanel(Widget):
         # Broadcasts arrive at ~30 Hz but the sweep changes a few times
         # per cycle; cache the Text on a snapshot of the inputs.
         try:
-            key = json.dumps([self.freq_sweep, self.auto_follow_enabled, self.engage_delay_s],
+            af = self.auto_follow or {}
+            blk = [af.get(k) for k in ("blocks_active", "block_index", "block_hz", "blocks_this_charge")]
+            blk.append(round(af["block_remaining_s"]) if af.get("block_remaining_s") is not None else None)
+            key = json.dumps([self.freq_sweep, self.auto_follow_enabled, self.engage_delay_s, blk],
                              sort_keys=True, default=str)
         except (TypeError, ValueError):
             key = None
@@ -181,8 +238,13 @@ class SweepPanel(Widget):
         if last:
             t.append(" Now:    ", style="dim")
             t.append(f"#{last['index'] + 1} ", style="dim")
-            t.append(f"{format_entry({k: v for k, v in last.items() if k in ('hz', 'mode')})}\n",
+            ents = fs.get("entries") or []
+            li = last.get("index")
+            shown = (ents[li] if isinstance(li, int) and 0 <= li < len(ents) and ents[li].get("blocks")
+                     else {k: v for k, v in last.items() if k in ('hz', 'mode')})
+            t.append("freq map\n" if shown.get("blocks") else f"{format_entry(shown)}\n",
                      style="bold green")
+        render_block_status(t, self.auto_follow, fs)
         if enabled and fs.get("entries"):
             t.append(" Next:   ", style="dim")
             if fs.get("discharge_seen"):
@@ -197,7 +259,7 @@ class SweepPanel(Widget):
             t.append(")\n", style="yellow")
 
         t.append("\n ENTRIES\n", style="bold white")
-        render_entry_list(t, fs)
+        render_entry_list(t, fs, self.auto_follow, per_row=5)
 
         t.append("\n Start delay:  ", style="dim")
         t.append(f"{self.engage_delay_s:g} s\n" if self.engage_delay_s else "off\n",
@@ -244,10 +306,12 @@ class SweepScreen(ModalScreen[None]):
     """
 
     freq_sweep: reactive[dict] = reactive({})
+    auto_follow: reactive[dict] = reactive({})
 
     def __init__(self, freq_sweep: dict, send: Callable[[dict], None],
-                 engage_delay_s: float = 0.0):
+                 engage_delay_s: float = 0.0, auto_follow: Optional[dict] = None):
         super().__init__()
+        self.set_reactive(SweepScreen.auto_follow, dict(auto_follow or {}))
         self._send = send
         self._engage_delay_s = engage_delay_s
         self.set_reactive(SweepScreen.freq_sweep, dict(freq_sweep or {}))
@@ -300,6 +364,10 @@ class SweepScreen(ModalScreen[None]):
 
     # -- live refresh --------------------------------------------------------
 
+    def watch_auto_follow(self, _old, _new) -> None:
+        if self.is_mounted:
+            self.query_one("#sweep-list", Static).update(self._list_text())
+
     def watch_freq_sweep(self, _old, _new) -> None:
         if not self.is_mounted:
             return
@@ -313,10 +381,15 @@ class SweepScreen(ModalScreen[None]):
         on = fs.get("enabled")
         t.append("Sweep ", style="dim")
         t.append("ON" if on else "OFF", style="bold green" if on else "bold red")
-        t.append(f"   end: {fs.get('end', 'loop')}   cycle: {fs.get('cycle', 0)}\n\n",
+        t.append(f"   end: {fs.get('end', 'loop')}   cycle: {fs.get('cycle', 0)}\n",
                  style="dim")
-        render_entry_list(t, fs)
+        render_block_status(t, self.auto_follow, fs)
+        t.append("\n")
+        render_entry_list(t, fs, self.auto_follow, per_row=9)
         t.append("\n ▶ running   → next", style="dim")
+        if any(e.get("blocks") for e in fs.get("entries") or []):
+            t.append("\n freq map: blocks run in this order, P = pass-through;\n"
+                     " the list restarts at block 1 every charge; green = running", style="dim")
         return t
 
     def _enable_label(self) -> str:

@@ -34,6 +34,7 @@ from tui.widgets.right_panel import RightPanel
 from tui.widgets.sensor_plot import SensorPlot
 from tui.widgets.auto_panel import AutoPanel
 from tui.widgets.sweep_panel import SweepPanel, SweepScreen
+from tui.widgets.mode_strip import ModeStrip
 from tui.widgets.measure_panel import KEY_TO_CONFIG, MeasurePanel
 from tui.widgets.connection_bar import ConnectionBar
 from tui.widgets.mascot import Mascot
@@ -531,6 +532,10 @@ class SwitchingCircuitApp(App):
     CircuitDiagram {
         width: auto;
     }
+    #circuit-col {
+        width: auto;
+        height: auto;
+    }
 
     /* Default: sensor plot below circuit (narrow) */
     #center-inner {
@@ -708,7 +713,9 @@ class SwitchingCircuitApp(App):
                 yield Mascot(id="mascot")
             with Vertical(id="center-col"):
                 with Container(id="center-inner"):
-                    yield CircuitDiagram(id="circuit")
+                    with Vertical(id="circuit-col"):
+                        yield CircuitDiagram(id="circuit")
+                        yield ModeStrip(id="mode-strip")
                     yield SensorPlot(id="sensor-plot")
             with Vertical(id="right-col"):
                 yield RightPanel(id="right-panel")
@@ -1053,8 +1060,12 @@ class SwitchingCircuitApp(App):
                 sweep_panel.freq_sweep = fs
                 sweep_panel.auto_follow_enabled = bool((af or {}).get("enabled"))
                 sweep_panel.engage_delay_s = float((af or {}).get("engage_delay_s") or 0.0)
+                sweep_panel.auto_follow = dict(af or {})
                 if isinstance(self.screen, SweepScreen):
                     self.screen.freq_sweep = fs
+                    self.screen.auto_follow = dict(af or {})
+            self.query_one("#mode-strip", ModeStrip).update_state(
+                af or self._latest_auto_follow, fs if fs is not None else self._latest_freq_sweep, mode)
 
             schedule_loaded = bool(monitor_data.get("loaded"))
             conn_bar.update_auto_status(monitor_data if schedule_loaded else {})
@@ -2048,7 +2059,8 @@ class SwitchingCircuitApp(App):
             return
         self.push_screen(SweepScreen(
             self._latest_freq_sweep, self._send_sweep,
-            engage_delay_s=float(self._latest_auto_follow.get("engage_delay_s") or 0.0)))
+            engage_delay_s=float(self._latest_auto_follow.get("engage_delay_s") or 0.0),
+            auto_follow=self._latest_auto_follow))
 
     def action_auto_follow_toggle(self) -> None:
         new = not bool(self._latest_auto_follow.get("enabled", False))
@@ -2395,5 +2407,9 @@ class SwitchingCircuitApp(App):
         self._prev_mode = "idle"
         self._showing_auto_panel = False
         self._latest_freq_sweep = {}
+        try:
+            self.query_one("#mode-strip", ModeStrip).update_state({}, {})
+        except Exception:
+            pass
         self._first_state_time = 0.0
         self._last_apply_time = 0.0

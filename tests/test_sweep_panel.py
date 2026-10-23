@@ -5,7 +5,7 @@ import unittest
 from rich.text import Text
 
 from tui.widgets.sweep_panel import (
-    SweepPanel, format_entry, parse_entry, parse_entry_list, render_entry_list,
+    SweepPanel, format_entry, parse_entry, parse_entry_list, render_block_status, render_entry_list,
 )
 
 
@@ -68,3 +68,50 @@ class TestRender(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFreqMapDetail(unittest.TestCase):
+    """Frequency-map entries: block order listed under the entry, running block highlighted,
+    live 'Block:' line from the auto-follow status."""
+
+    BLOCKS = [[200.0, 60.0], [307.0, 60.0], [0.0, 60.0], [1000.0, 60.0], [10.0, 60.0],
+              [23.0, 60.0], [50.0, 60.0], [0.0, 60.0]]
+    FS = {"enabled": True, "end": "hold", "cycle": 1, "default_mode": "charge", "current_index": 0,
+          "next_index": 1, "entries": [{"blocks": BLOCKS}, {"mode": "passthrough"}]}
+    AF = {"enabled": True, "active": True, "blocks_active": True, "block_index": 3, "block_hz": 1000.0,
+          "block_remaining_s": 41.2, "blocks_this_charge": 4}
+
+    def test_block_order_listed(self):
+        t = Text()
+        render_entry_list(t, self.FS)
+        s = t.plain
+        self.assertIn("freq map 8 × 60 s (2 P)", s)
+        self.assertIn(" 1│  200  307    P 1000   10", s)
+        self.assertIn(" 6│   23   50    P", s)
+
+    def test_running_block_highlighted(self):
+        t = Text()
+        render_entry_list(t, self.FS, self.AF)
+        hi = [t.plain[sp.start:sp.end] for sp in t.spans if "on green" in str(sp.style)]
+        self.assertEqual(hi, ["1000"])
+
+    def test_block_status_line(self):
+        t = Text()
+        render_block_status(t, self.AF, self.FS)
+        self.assertIn("Block:  4/8 1000 Hz · 41 s left", t.plain)
+        self.assertIn("4 blocks this charge", t.plain)
+        t = Text()
+        render_block_status(t, dict(self.AF, block_hz=0.0, block_index=2), self.FS)
+        self.assertIn("3/8 pass-through", t.plain)
+        t = Text()
+        render_block_status(t, {"blocks_active": False}, self.FS)
+        self.assertEqual(t.plain, "")
+
+    def test_panel_shows_live_block(self):
+        p = SweepPanel()
+        p.freq_sweep = self.FS
+        p.auto_follow_enabled = True
+        p.auto_follow = self.AF
+        s = p._render_impl().plain
+        self.assertIn("Block:  4/8 1000 Hz", s)
+        self.assertIn(" 1│  200", s)
