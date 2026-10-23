@@ -43,6 +43,16 @@ engagement (the sweep does not see it as a re-engage). The settings come
 from the sweep entry when it has them, otherwise from set_pause(). Added
 to test whether the brief pass-through gaps the old single-reading exit
 produced at 307 Hz (about every 15 s, under 1 s each) change CE.
+
+Frequency blocks (sweep entry "blocks": [[hz, seconds], ...]; hz 0 =
+pass-through): at engage the board starts the list and changes the
+switching frequency at each block boundary, live, without opening the
+circuit; a pass-through block drops to all-on like a pause and the next
+switched block resumes the engaged mode at its own frequency. The list
+wraps if the charge outlasts it and restarts at every engagement. Each
+block start is logged ("block:<i>"). Built for the frequency response
+map (Cycle_Toughness/FreqMap): many frequencies compared within one
+charge. An entry has blocks or pauses, not both.
 """
 
 from __future__ import annotations
@@ -133,6 +143,11 @@ class AutoFollow:
         self._next_pause: Optional[float] = None
         self._pause_until: Optional[float] = None
         self._pauses = 0                    # pauses in the current engagement
+        self._blocks: Optional[list] = None  # [[hz, s], ...] for the current engagement
+        self._block_i = 0
+        self._block_until: Optional[float] = None
+        self._block_pass = False            # the current block is pass-through
+        self._blocks_started = 0
 
         self._loop_period = 1.0 / float(loop_hz)
         self._thread: Optional[threading.Thread] = None
@@ -274,6 +289,12 @@ class AutoFollow:
                 "pause_active_cfg": list(self._pause_cfg) if self._pause_cfg else None,
                 "in_pause": self._pause_until is not None,
                 "pauses_this_charge": self._pauses,
+                "blocks_active": bool(self._blocks),
+                "block_index": self._block_i if self._blocks else None,
+                "block_hz": self._blocks[self._block_i][0] if self._blocks else None,
+                "block_remaining_s": (round(max(0.0, self._block_until - self._clock()), 1)
+                                      if self._blocks and self._block_until is not None else None),
+                "blocks_this_charge": self._blocks_started,
                 # Seconds the current has been above i_enter while
                 # waiting out the engage delay (None when not waiting).
                 "engage_pending_s": (
@@ -318,6 +339,7 @@ class AutoFollow:
 
         target = None
         pause_action = None
+        block_action = None
         with self._lock:
             self._latest_avg_i = avg_i
             self._latest_avg_v = avg_v
@@ -341,6 +363,8 @@ class AutoFollow:
                 self._is_active = False
                 self._active_i.clear()
                 self._clear_pauses()
+            elif self._blocks:
+                block_action = self._block_step()
             else:
                 pause_action = self._pause_step()
 
@@ -357,18 +381,49 @@ class AutoFollow:
                 if swept is not None:
                     target = swept
 
+        first_block = None
         if target is not None and target != "discharge":
-            cfg = sweep.current_pause() if (sweep is not None and sweep.enabled) else None
+            sweeping = sweep is not None and sweep.enabled
+            blocks = sweep.current_blocks() if sweeping else None
+            cfg = None if blocks else (sweep.current_pause() if sweeping else None)
             with self._lock:
-                if cfg is None and self._pause_every_s > 0:
+                if cfg is None and not blocks and self._pause_every_s > 0:
                     cfg = (self._pause_every_s, self._pause_s)
                 self._engaged_mode = target
                 self._pause_cfg = cfg
                 self._next_pause = self._clock() + cfg[0] if cfg else None
+                if blocks:
+                    self._blocks = blocks
+                    self._block_i = 0
+                    self._block_until = self._clock() + blocks[0][1]
+                    self._block_pass = blocks[0][0] == 0
+                    self._blocks_started = 1
+                    first_block = blocks[0][0]
+
+        if first_block is not None:
+            # First block: set its frequency before switching starts, or stay in pass-through.
+            sweep.log_block(0, first_block, avg_i, avg_v)
+            if first_block == 0:
+                log.info("AutoFollow: engaged, block 0 pass-through (i=%.4f A)", avg_i)
+                self._set_mode("discharge")
+                return
+            sweep.set_block_frequency(first_block)
 
         if target is not None:
             log.info("AutoFollow: -> %s (i=%.4f A)", target, avg_i)
             self._set_mode(target)
+        elif block_action is not None:
+            i, hz, was_pass, mode = block_action
+            if hz == 0:
+                if not was_pass:
+                    self._set_mode("discharge")
+            else:
+                if sweep is not None:
+                    sweep.set_block_frequency(hz)
+                if was_pass:
+                    self._set_mode(mode)
+            if sweep is not None:
+                sweep.log_block(i, hz, avg_i, avg_v)
         elif pause_action == "pause":
             self._set_mode("discharge")
             if sweep is not None and sweep.enabled:
@@ -377,12 +432,33 @@ class AutoFollow:
             self._set_mode(pause_action)            # resume the engaged mode
 
     def _clear_pauses(self):
-        """Caller holds the lock."""
+        """Caller holds the lock. Also clears the frequency blocks."""
         self._pause_cfg = None
         self._engaged_mode = None
         self._next_pause = None
         self._pause_until = None
         self._pauses = 0
+        self._blocks = None
+        self._block_i = 0
+        self._block_until = None
+        self._block_pass = False
+        self._blocks_started = 0
+
+    def _block_step(self) -> Optional[tuple]:
+        """Engaged with frequency blocks: next block due? Caller holds the lock.
+        Returns (index, hz, previous_was_pass, engaged_mode) or None."""
+        if not self._blocks or self._block_until is None:
+            return None
+        now = self._clock()
+        if now < self._block_until:
+            return None
+        was_pass = self._block_pass
+        self._block_i = (self._block_i + 1) % len(self._blocks)
+        hz, dur = self._blocks[self._block_i]
+        self._block_until = now + dur
+        self._block_pass = hz == 0
+        self._blocks_started += 1
+        return self._block_i, hz, was_pass, self._engaged_mode or self._target_mode
 
     def _pause_step(self) -> Optional[str]:
         """Engaged and staying engaged: start or end a pause? Caller holds the lock.

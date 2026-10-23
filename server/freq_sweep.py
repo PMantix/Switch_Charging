@@ -67,6 +67,35 @@ _LOG_FIELDS = (
 )
 
 
+def normalize_blocks(blocks) -> list:
+    """[[hz, seconds], ...] (or [{"hz":, "s":}, ...]) -> canonical [[hz, s], ...]; hz 0 = pass-through.
+    Raises ValueError."""
+    from server.config import FREQ_BLOCK_S_LIMITS, FREQ_BLOCK_MAX
+    if not isinstance(blocks, (list, tuple)) or not blocks:
+        raise ValueError("blocks must be a non-empty list of [hz, seconds]")
+    if len(blocks) > FREQ_BLOCK_MAX:
+        raise ValueError(f"at most {FREQ_BLOCK_MAX} blocks per entry, got {len(blocks)}")
+    lo, hi = FREQ_BLOCK_S_LIMITS
+    out = []
+    for b in blocks:
+        if isinstance(b, dict):
+            hz, s = b.get("hz"), b.get("s", b.get("seconds"))
+        elif isinstance(b, (list, tuple)) and len(b) == 2:
+            hz, s = b
+        else:
+            raise ValueError(f"block must be [hz, seconds], got {b!r}")
+        try:
+            hz, s = float(hz), float(s)
+        except (TypeError, ValueError):
+            raise ValueError(f"block must be numbers [hz, seconds], got {b!r}")
+        if hz != 0 and not MIN_FREQ <= hz <= MAX_FREQ:
+            raise ValueError(f"block hz must be 0 (pass-through) or in [{MIN_FREQ}, {MAX_FREQ}], got {hz}")
+        if not lo <= s <= hi:
+            raise ValueError(f"block length must be {lo:g}-{hi:g} s, got {s}")
+        out.append([hz, s])
+    return out
+
+
 def normalize_entry(entry) -> dict:
     """Validate one entry and return it in canonical form.
 
@@ -92,6 +121,12 @@ def normalize_entry(entry) -> dict:
         if not MIN_FREQ <= hz <= MAX_FREQ:
             raise ValueError(f"Entry hz must be in [{MIN_FREQ}, {MAX_FREQ}], got {hz}")
         out["hz"] = hz
+    if "blocks" in entry:
+        if "pause_every_s" in entry or "pause_s" in entry:
+            raise ValueError("an entry can have blocks or pauses, not both")
+        if out.get("mode") == "passthrough":
+            raise ValueError("a pass-through entry cannot have frequency blocks")
+        out["blocks"] = normalize_blocks(entry["blocks"])
     if ("pause_every_s" in entry) != ("pause_s" in entry):
         raise ValueError(f"Entry needs both pause_every_s and pause_s, or neither: {entry!r}")
     if "pause_every_s" in entry:
@@ -99,7 +134,7 @@ def normalize_entry(entry) -> dict:
         every, length = validate_pause(entry["pause_every_s"], entry["pause_s"])
         if every:
             out["pause_every_s"], out["pause_s"] = every, length
-    if "hz" not in out and out.get("mode") != "passthrough":
+    if "hz" not in out and out.get("mode") != "passthrough" and "blocks" not in out:
         # A switching entry with no frequency would silently reuse
         # whatever was set last — almost certainly a typo in the list.
         raise ValueError(f"Entry needs 'hz' (or mode 'passthrough'): {entry!r}")
@@ -325,6 +360,27 @@ class FreqSweep:
                 return None
             e = self._entries[self._current]
             return (e["pause_every_s"], e["pause_s"]) if "pause_every_s" in e else None
+
+    def current_blocks(self) -> Optional[list]:
+        """[[hz, s], ...] of the entry applied at the last onset, or None."""
+        with self._lock:
+            if not self._enabled or self._current is None or self._current >= len(self._entries):
+                return None
+            b = self._entries[self._current].get("blocks")
+            return [list(x) for x in b] if b else None
+
+    def set_block_frequency(self, hz: float):
+        """Switching frequency for a frequency block (never 0: pass-through blocks use the mode)."""
+        if hz > 0:
+            self._set_frequency(hz)
+
+    def log_block(self, index: int, hz: float, avg_i: float = 0.0, avg_v: float = 0.0):
+        """One log row per block start (event "block:<index>"; frequency 0 = pass-through)."""
+        with self._lock:
+            la = dict(self._last_applied) if self._last_applied else None
+        if la:
+            self._write_log(la["cycle"], la["index"], "passthrough" if hz == 0 else la["mode"], hz,
+                            f"block:{index}", avg_i, avg_v)
 
     def log_pause(self, avg_i: float = 0.0, avg_v: float = 0.0):
         """One log row per pause (event "pause"), tagged with the current cycle and entry."""

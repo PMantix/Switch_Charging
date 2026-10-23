@@ -86,6 +86,12 @@ def format_entry(entry: dict, default_mode: str = "charge") -> str:
     mode = entry.get("mode", default_mode)
     if mode == "passthrough":
         return "pass"
+    if entry.get("blocks"):
+        bl = entry["blocks"]
+        n_pass = sum(1 for h, _ in bl if h == 0)
+        secs = {s for _, s in bl}
+        dur = f"{bl[0][1]:g} s" if len(secs) == 1 else "mixed"
+        return f"freq map: {len(bl)} blocks × {dur} ({n_pass} pass)"
     hz = entry.get("hz")
     hz_s = f"{hz:g} Hz" if hz is not None else "? Hz"
     out = f"{hz_s} pulse" if mode == "pulse_charge" else hz_s

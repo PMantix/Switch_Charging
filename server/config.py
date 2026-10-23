@@ -148,6 +148,10 @@ AUTO_FOLLOW_EXIT_CONFIRM_S = 1.0  # s — exit needs the MEAN current over this 
 # (all FETs on) for PAUSE_S, then resume the same mode. Off by default; set per board or per sweep entry.
 AUTO_FOLLOW_PAUSE_EVERY_LIMITS = (1.0, 600.0)    # s
 AUTO_FOLLOW_PAUSE_LIMITS = (0.05, 10.0)          # s, and always shorter than the interval
+# Frequency blocks ("frequency response map", Cycle_Toughness/FreqMap): a sweep entry may carry a list of
+# [hz, seconds] blocks that auto-follow steps through within one charge; hz 0 = pass-through (all FETs on).
+FREQ_BLOCK_S_LIMITS = (5.0, 600.0)               # s per block
+FREQ_BLOCK_MAX = 64                              # blocks per entry
 
 # ---------------------------------------------------------------------------
 # Measurement mode (server/measure.py): held state, precision sensing
