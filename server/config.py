@@ -152,6 +152,8 @@ AUTO_FOLLOW_PAUSE_LIMITS = (0.05, 10.0)          # s, and always shorter than th
 # [hz, seconds] blocks that auto-follow steps through within one charge; hz 0 = pass-through (all FETs on).
 FREQ_BLOCK_S_LIMITS = (5.0, 600.0)               # s per block
 FREQ_BLOCK_MAX = 128                             # blocks per entry (map 3: 112 x 15 s in a 28 min charge)
+FAST_STREAM_HZ_LIMITS = (16.0, 350.0)            # fast sensor stream inside frequency blocks (/s)
+FAST_STREAM_FALLBACK_HZ = 15.0                   # base rate to restore if the pre-fast rate was not known
 
 # ---------------------------------------------------------------------------
 # Measurement mode (server/measure.py): held state, precision sensing

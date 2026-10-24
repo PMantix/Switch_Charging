@@ -326,6 +326,9 @@ def main():
                 mc.set_auto_follow_exit_confirm(af["exit_confirm_s"])
             if af.get("pause_every_s"):
                 mc.set_auto_follow_pause(af["pause_every_s"], af.get("pause_s", 0))
+            if af.get("fast_stream_hz"):
+                mc.set_auto_follow_fast_stream(af["fast_stream_hz"], af.get("fast_stream_start_block", 1),
+                                               af.get("fast_stream_stop_before_end_s", 90.0))
             # Sweep position is restored before auto-follow is enabled, so
             # a restart mid-experiment resumes on the right entry.
             if saved_state.get("freq_sweep"):

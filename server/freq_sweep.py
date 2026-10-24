@@ -389,6 +389,13 @@ class FreqSweep:
         if la:
             self._write_log(la["cycle"], la["index"], la["mode"], la["hz"], "pause", avg_i, avg_v)
 
+    def log_event(self, event: str, avg_i: float = 0.0, avg_v: float = 0.0):
+        """A free-form log row (e.g. "fast_stream:300", "fast_stream:off"), tagged with the current cycle/entry."""
+        with self._lock:
+            la = dict(self._last_applied) if self._last_applied else None
+        if la:
+            self._write_log(la["cycle"], la["index"], la["mode"], la["hz"], event, avg_i, avg_v)
+
     # -- status / persistence -----------------------------------------------
 
     def get_status(self) -> dict:

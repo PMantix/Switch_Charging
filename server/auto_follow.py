@@ -64,6 +64,7 @@ from time import monotonic, sleep
 from typing import Callable, Optional
 
 from server.config import (
+    FAST_STREAM_HZ_LIMITS, FAST_STREAM_FALLBACK_HZ,
     AUTO_FOLLOW_EXIT_CONFIRM_S,
     AUTO_FOLLOW_PAUSE_EVERY_LIMITS,
     AUTO_FOLLOW_PAUSE_LIMITS,
@@ -107,6 +108,8 @@ class AutoFollow:
         is_data_fresh_fn: Optional[Callable[[], bool]] = None,
         sweep=None,
         clock: Callable[[], float] = monotonic,
+        set_stream_rate_fn: Optional[Callable[[float], None]] = None,
+        get_stream_rate_fn: Optional[Callable[[], float]] = None,
     ):
         if i_enter_a <= i_exit_a:
             raise ValueError(
@@ -148,6 +151,19 @@ class AutoFollow:
         self._block_until: Optional[float] = None
         self._block_pass = False            # the current block is pass-through
         self._blocks_started = 0
+        self._blocks_t0: Optional[float] = None   # when the current engagement's first block started
+        self._blocks_total_s = 0.0                # one pass through its block list
+        # Fast sensor stream inside frequency blocks (set_fast_stream): the sensor stream runs at fast_hz only
+        # between the start of block `start_block` and `stop_before_end_s` before the block list's first pass
+        # ends, so every mode change (engage, exit, pass-through) happens at the base rate. Above ~60/s the
+        # RP2040 can miss mode-change commands (SW10, 2026-10-24).
+        self._set_stream_rate = set_stream_rate_fn
+        self._get_stream_rate = get_stream_rate_fn
+        self._fast_hz = 0.0
+        self._fast_start_block = 1
+        self._fast_stop_before_s = 90.0
+        self._fast_on = False
+        self._fast_base: Optional[float] = None
 
         self._loop_period = 1.0 / float(loop_hz)
         self._thread: Optional[threading.Thread] = None
@@ -240,6 +256,22 @@ class AutoFollow:
         log.info("AutoFollow: pauses %s", "off" if not every_s else
                  "%.2f s every %.1f s" % (pause_s, every_s))
 
+    def set_fast_stream(self, hz: float, start_block: int = 1, stop_before_end_s: float = 90.0):
+        """Fast sensor stream inside frequency blocks. hz = 0 turns it off. Only used for engagements whose block
+        list has no pass-through block (a pass block is a mode change)."""
+        hz, start_block, stop = float(hz), int(start_block), float(stop_before_end_s)
+        if hz != 0 and not FAST_STREAM_HZ_LIMITS[0] <= hz <= FAST_STREAM_HZ_LIMITS[1]:
+            raise ValueError(f"fast stream rate must be 0 (off) or {FAST_STREAM_HZ_LIMITS[0]:g}-"
+                             f"{FAST_STREAM_HZ_LIMITS[1]:g} /s, got {hz}")
+        if start_block < 1:
+            raise ValueError(f"start_block must be >= 1 (block 0 holds the engage), got {start_block}")
+        if not 10.0 <= stop <= 600.0:
+            raise ValueError(f"stop_before_end_s must be 10-600 s, got {stop}")
+        with self._lock:
+            self._fast_hz, self._fast_start_block, self._fast_stop_before_s = hz, start_block, stop
+        log.info("AutoFollow: fast stream %s", "off" if not hz else
+                 "%g /s from block %d to %g s before the end" % (hz, start_block, stop))
+
     def set_cc_setpoint(self, amps: float):
         with self._lock:
             self._cc_setpoint_a = max(0.0, float(amps))
@@ -295,6 +327,11 @@ class AutoFollow:
                 "block_remaining_s": (round(max(0.0, self._block_until - self._clock()), 1)
                                       if self._blocks and self._block_until is not None else None),
                 "blocks_this_charge": self._blocks_started,
+                "fast_stream_hz": self._fast_hz,
+                "fast_stream_start_block": self._fast_start_block,
+                "fast_stream_stop_before_end_s": self._fast_stop_before_s,
+                "fast_stream_on": self._fast_on,
+                "fast_stream_base_hz": self._fast_base,
                 # Seconds the current has been above i_enter while
                 # waiting out the engage delay (None when not waiting).
                 "engage_pending_s": (
@@ -329,6 +366,8 @@ class AutoFollow:
 
     def _tick(self):
         if self._is_data_fresh is not None and not self._is_data_fresh():
+            if self._fast_on:
+                self._stream_down("stale sensor data")
             return
         sensor_data = self._get_sensor_data()
         if not sensor_data:
@@ -340,11 +379,19 @@ class AutoFollow:
         target = None
         pause_action = None
         block_action = None
+        fast = None                                   # "up" / "down": change the sensor stream rate
         with self._lock:
             self._latest_avg_i = avg_i
             self._latest_avg_v = avg_v
             if not self._enabled:
-                return
+                fast_down = self._fast_on
+            else:
+                fast_down = None
+        if fast_down:
+            self._stream_down("auto-follow disabled")
+        if fast_down is not None:
+            return
+        with self._lock:
             sweep = self._sweep
             if not self._is_active and avg_i > self._i_enter_a:
                 now = self._clock()
@@ -363,8 +410,11 @@ class AutoFollow:
                 self._is_active = False
                 self._active_i.clear()
                 self._clear_pauses()
+                if self._fast_on:
+                    fast = "down"
             elif self._blocks:
                 block_action = self._block_step()
+                fast = self._fast_step()
             else:
                 pause_action = self._pause_step()
 
@@ -398,6 +448,8 @@ class AutoFollow:
                     self._block_until = self._clock() + blocks[0][1]
                     self._block_pass = blocks[0][0] == 0
                     self._blocks_started = 1
+                    self._blocks_t0 = self._clock()
+                    self._blocks_total_s = float(sum(d for _, d in blocks))
                     first_block = blocks[0][0]
 
         if first_block is not None:
@@ -409,6 +461,8 @@ class AutoFollow:
                 return
             sweep.set_block_frequency(first_block)
 
+        if fast == "down":                            # before any mode change: back to the base rate first
+            self._stream_down("leaving the fast window", avg_i, avg_v)
         if target is not None:
             log.info("AutoFollow: -> %s (i=%.4f A)", target, avg_i)
             self._set_mode(target)
@@ -430,6 +484,64 @@ class AutoFollow:
                 sweep.log_pause(avg_i, avg_v)
         elif pause_action is not None:
             self._set_mode(pause_action)            # resume the engaged mode
+        if fast == "up":                              # after this tick's block change
+            self._stream_up(avg_i, avg_v)
+
+    # -- fast sensor stream inside blocks ---------------------------------------
+
+    def _fast_step(self) -> Optional[str]:
+        """Engaged with blocks: enter or leave the fast-stream window? Caller holds the lock."""
+        if self._set_stream_rate is None or not self._blocks or self._blocks_t0 is None:
+            return None
+        if any(hz == 0 for hz, _ in self._blocks):
+            return "down" if self._fast_on else None      # pass-through blocks are mode changes: never fast
+        now = self._clock()
+        window_end = self._blocks_t0 + self._blocks_total_s - self._fast_stop_before_s
+        in_window = (self._fast_hz > 0 and self._blocks_started - 1 >= self._fast_start_block
+                     and now < window_end)
+        if in_window and not self._fast_on:
+            return "up"
+        if self._fast_on and not in_window:
+            return "down"
+        return None
+
+    def _stream_up(self, avg_i=0.0, avg_v=0.0):
+        with self._lock:
+            if self._fast_on or self._fast_hz <= 0:
+                return
+            hz = self._fast_hz
+        base = self._get_stream_rate() if self._get_stream_rate else None
+        try:
+            self._set_stream_rate(hz)
+        except Exception:
+            log.exception("AutoFollow: fast stream: could not set %g /s", hz)
+            return
+        with self._lock:
+            self._fast_on = True
+            self._fast_base = base
+        log.info("AutoFollow: fast stream on (%g /s, base %s /s)", hz, base)
+        if self._sweep is not None:
+            self._sweep.log_event(f"fast_stream:{hz:g}", avg_i, avg_v)
+
+    def _stream_down(self, why: str, avg_i=0.0, avg_v=0.0):
+        with self._lock:
+            if not self._fast_on:
+                return
+            base = self._fast_base if self._fast_base else FAST_STREAM_FALLBACK_HZ
+        try:
+            self._set_stream_rate(base)
+        except Exception:
+            log.exception("AutoFollow: fast stream: could not restore %g /s", base)
+        with self._lock:
+            self._fast_on = False
+        log.info("AutoFollow: fast stream off (%s; back to %g /s)", why, base)
+        if self._sweep is not None:
+            self._sweep.log_event("fast_stream:off", avg_i, avg_v)
+
+    def persist_stream_rate(self, current: float) -> float:
+        """The rate to save across a power cycle: the base rate while the fast window is on."""
+        with self._lock:
+            return self._fast_base if self._fast_on and self._fast_base else current
 
     def _clear_pauses(self):
         """Caller holds the lock. Also clears the frequency blocks."""
@@ -443,6 +555,8 @@ class AutoFollow:
         self._block_until = None
         self._block_pass = False
         self._blocks_started = 0
+        self._blocks_t0 = None
+        self._blocks_total_s = 0.0
 
     def _block_step(self) -> Optional[tuple]:
         """Engaged with frequency blocks: next block due? Caller holds the lock.

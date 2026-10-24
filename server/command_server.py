@@ -96,7 +96,7 @@ class CommandServer:
                 "mode": self._mc.mode_to_persist().value,
                 "frequency": engine_state["frequency"],
                 "sequence": engine_state["sequence"],
-                "sensor_rate": self._mc._gpio.get_sensor_rate(),
+                "sensor_rate": self._mc.persist_stream_rate(),   # the base rate, never the fast window's
                 "ina226_avg": profile.get("avg"),
                 "bus_every": profile.get("bus_every"),
                 "auto_follow": {
@@ -109,6 +109,9 @@ class CommandServer:
                     "exit_confirm_s": af.get("exit_confirm_s"),
                     "pause_every_s": af.get("pause_every_s"),
                     "pause_s": af.get("pause_s"),
+                    "fast_stream_hz": af.get("fast_stream_hz", 0.0),
+                    "fast_stream_start_block": af.get("fast_stream_start_block", 1),
+                    "fast_stream_stop_before_end_s": af.get("fast_stream_stop_before_end_s", 90.0),
                 },
                 "freq_sweep": self._mc.get_freq_sweep().to_state(),
             })
@@ -542,6 +545,15 @@ class CommandServer:
                     self._mc.set_auto_follow_pause(msg.get("pause_every_s", 0), msg.get("pause_s", 0))
                 except (TypeError, ValueError) as e:
                     return {"ok": False, "error": f"Bad pause setting: {e}"}
+                self._persist_state()
+                return {"ok": True, "auto_follow": self._mc.get_auto_follow_status()}
+
+            elif cmd == "auto_follow_set_fast_stream":
+                try:
+                    self._mc.set_auto_follow_fast_stream(msg.get("hz", 0), msg.get("start_block", 1),
+                                                         msg.get("stop_before_end_s", 90.0))
+                except (TypeError, ValueError) as e:
+                    return {"ok": False, "error": f"Bad fast-stream setting: {e}"}
                 self._persist_state()
                 return {"ok": True, "auto_follow": self._mc.get_auto_follow_status()}
 

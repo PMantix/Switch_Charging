@@ -65,6 +65,8 @@ class ModeController:
             set_mode_fn=lambda m: self._set_mode_internal(Mode(m)),
             is_data_fresh_fn=self._gpio.sensor_data_fresh,
             sweep=self._freq_sweep,
+            set_stream_rate_fn=self._gpio.set_sensor_rate,
+            get_stream_rate_fn=self._gpio.get_sensor_rate,
         )
         self._auto_follow.start()
 
@@ -293,6 +295,12 @@ class ModeController:
 
     def set_auto_follow_pause(self, every_s: float, pause_s: float):
         self._auto_follow.set_pause(every_s, pause_s)
+
+    def set_auto_follow_fast_stream(self, hz: float, start_block: int = 1, stop_before_end_s: float = 90.0):
+        self._auto_follow.set_fast_stream(hz, start_block, stop_before_end_s)
+
+    def persist_stream_rate(self) -> float:
+        return self._auto_follow.persist_stream_rate(self._gpio.get_sensor_rate())
 
     def set_auto_follow_target(self, mode: str):
         self._auto_follow.set_target_mode(mode)

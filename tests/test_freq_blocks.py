@@ -163,3 +163,82 @@ class TestMap3Entry(unittest.TestCase):
             self.assertEqual(ran[:n], [float(h) for h in orders[0]])           # every block, in plan order
             blocks = [x for x in r.log() if x["event"].startswith("block:")]
             self.assertEqual([int(x["event"].split(":")[1]) for x in blocks][:n], list(range(n)))
+
+
+class TestFastStream(unittest.TestCase):
+    """Fast sensor stream inside frequency blocks: up after the start block, down before the block list's first
+    pass ends, down before an exit's mode change, never with pass-through blocks, down on stale data."""
+
+    def _rig(self, d, entries, base=15.0):
+        r = _Rig(d, entries)
+        r.rates = []
+        r.rate = [base]
+        def set_rate(hz):
+            r.rates.append((round(r.clock.t, 2), hz))
+            r.rate[0] = hz
+        r.af._set_stream_rate = set_rate
+        r.af._get_stream_rate = lambda: r.rate[0]
+        r.af._set_mode = MagicMock(side_effect=lambda m: r.modes.append((round(r.clock.t, 2), m, r.rate[0])))
+        r.af.set_fast_stream(300, start_block=1, stop_before_end_s=30)
+        return r
+
+    def test_window_and_mode_changes_at_base_rate(self):
+        blocks = [[23.0, 15.0], [10.0, 15.0], [200.0, 15.0], [1.0, 15.0], [5.0, 15.0], [1000.0, 15.0]]   # 90 s
+        with tempfile.TemporaryDirectory() as d:
+            r = self._rig(d, [{"blocks": blocks}])
+            t0 = r.clock.t
+            r.run(0.2, 95.0)                                   # engaged through the block list
+            r.run(0.0, 3.0)                                    # charge ends: exit
+            self.assertEqual([hz for _, hz in r.rates], [300, 15.0])
+            t_up, t_down = r.rates[0][0] - t0, r.rates[1][0] - t0
+            self.assertAlmostEqual(t_up, 15.0, delta=0.2)      # at the start of block 1
+            self.assertAlmostEqual(t_down, 60.0, delta=0.2)    # 90 s list - 30 s margin
+            self.assertTrue(all(rate == 15.0 for _, m, rate in r.modes))   # every mode change at the base rate
+            ev = [x["event"] for x in r.log()]
+            self.assertIn("fast_stream:300", ev)
+            self.assertIn("fast_stream:off", ev)
+            self.assertFalse(r.af.get_status()["fast_stream_on"])
+
+    def test_early_exit_drops_rate_before_mode_change(self):
+        blocks = [[23.0, 15.0]] * 8                           # 120 s
+        with tempfile.TemporaryDirectory() as d:
+            r = self._rig(d, [{"blocks": blocks}])
+            r.run(0.2, 40.0)                                   # fast window open
+            self.assertTrue(r.af.get_status()["fast_stream_on"])
+            r.run(0.0, 3.0)                                    # unexpected end of charge
+            exit_modes = [x for x in r.modes if x[1] == "discharge"]
+            self.assertTrue(exit_modes and exit_modes[-1][2] == 15.0)
+            self.assertEqual(r.rates[-1][1], 15.0)
+
+    def test_never_fast_with_pass_blocks(self):
+        blocks = [[23.0, 15.0], [0.0, 15.0], [10.0, 15.0], [200.0, 15.0]]
+        with tempfile.TemporaryDirectory() as d:
+            r = self._rig(d, [{"blocks": blocks}])
+            r.run(0.2, 55.0)
+            self.assertEqual(r.rates, [])
+
+    def test_stale_data_drops_rate(self):
+        blocks = [[23.0, 15.0]] * 8
+        with tempfile.TemporaryDirectory() as d:
+            r = self._rig(d, [{"blocks": blocks}])
+            r.run(0.2, 30.0)
+            self.assertTrue(r.af.get_status()["fast_stream_on"])
+            r.af._is_data_fresh = lambda: False
+            r.run(0.2, 0.5)
+            self.assertFalse(r.af.get_status()["fast_stream_on"])
+            self.assertEqual(r.rates[-1][1], 15.0)
+
+    def test_persist_rate_is_base_while_fast(self):
+        blocks = [[23.0, 15.0]] * 8
+        with tempfile.TemporaryDirectory() as d:
+            r = self._rig(d, [{"blocks": blocks}])
+            r.run(0.2, 30.0)
+            self.assertEqual(r.af.persist_stream_rate(r.rate[0]), 15.0)
+
+    def test_validation(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = _Rig(d, [{"blocks": [[23.0, 15.0]]}])
+            for bad in ((5, 1, 90), (400, 1, 90), (300, 0, 90), (300, 1, 5)):
+                with self.assertRaises(ValueError):
+                    r.af.set_fast_stream(*bad)
+            r.af.set_fast_stream(0)                            # off is fine
