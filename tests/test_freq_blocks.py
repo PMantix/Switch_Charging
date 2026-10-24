@@ -49,7 +49,9 @@ class TestValidation(unittest.TestCase):
                          [[0.0, 60.0], [307.0, 60.0], [23.0, 30.0]])
         e = normalize_entry({"blocks": [[0, 60], [107, 60]]})
         self.assertEqual(e, {"blocks": [[0.0, 60.0], [107.0, 60.0]]})      # no hz needed
-        for bad in ([], [[107, 2]], [[107, 700]], [[0.001, 60]], [[107]], "x", [[107, 60]] * 65):
+        from server.config import FREQ_BLOCK_MAX
+        normalize_blocks([[107, 15]] * FREQ_BLOCK_MAX)                         # the limit itself is accepted
+        for bad in ([], [[107, 2]], [[107, 700]], [[0.001, 60]], [[107]], "x", [[107, 60]] * (FREQ_BLOCK_MAX + 1)):
             with self.assertRaises(ValueError):
                 normalize_blocks(bad)
         with self.assertRaises(ValueError):
@@ -142,3 +144,22 @@ class TestBlocks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMap3Entry(unittest.TestCase):
+    """Frequency map 3: 112 blocks of 15 s in one 28 min charge, no pass-through, every block stepped on time."""
+
+    def test_112_short_blocks_step_through_in_order(self):
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+        import freqmap_sweep as T
+        settings = [1, 1.5, 2, 3, 5, 7, 10, 23, 200, 1000]
+        entries, orders, n = T.build(1, 15.0, [31], settings, 0.70 * 205.0, 308.0, full_rounds=True, first_min_hz=10)
+        self.assertEqual(n, 112)
+        with tempfile.TemporaryDirectory() as d:
+            r = _Rig(d, entries)
+            r.run(0.2, n * 15.0 + 1.0)                                         # one engaged charge
+            ran = r.freqs()
+            self.assertEqual(ran[:n], [float(h) for h in orders[0]])           # every block, in plan order
+            blocks = [x for x in r.log() if x["event"].startswith("block:")]
+            self.assertEqual([int(x["event"].split(":")[1]) for x in blocks][:n], list(range(n)))

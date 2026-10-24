@@ -29,24 +29,36 @@ MAIN_MAH = 0.70 * 205.0                                   # fixed main charge (B
 I_MAIN_MA = 308.0
 
 
-def block_order(seed: int, settings, thirds: int = 3) -> list:
+def block_order(seed: int, settings, thirds: int = 3, n: int | None = None, first_min_hz: float | None = None) -> list:
+    """Each setting once per round, shuffled, never the same setting twice in a row. Default: `thirds` rounds. With
+    ``n``: as many rounds as the n blocks need, cut to n (every block is drawn fresh, nothing repeats). With
+    ``first_min_hz``: block 0 must be a switched setting >= that (the step-7 pulse runs at block 0's setting)."""
     rng = random.Random(seed)
+    rounds = thirds if n is None else math.ceil(n / len(settings))
     while True:
         order = []
-        for _ in range(thirds):
+        for _ in range(rounds):
             third = list(settings)
             rng.shuffle(third)
             order += third
-        if all(a != b for a, b in zip(order, order[1:])):
+        if n is not None:
+            order = order[:n]
+        if all(a != b for a, b in zip(order, order[1:])) and (first_min_hz is None or order[0] >= first_min_hz):
             return order
 
 
-def build(charges: int, block_s: float, seeds, settings, main_mah: float, i_ma: float):
+def build(charges: int, block_s: float, seeds, settings, main_mah: float, i_ma: float, full_rounds: bool = False,
+          first_min_hz: float | None = None):
+    """full_rounds: draw rounds of the whole setting list for every block of the charge (frequency map 3: many
+    short blocks). Default: three shuffled rounds, repeated to fill the charge (maps 1-2)."""
     n_blocks = math.ceil(main_mah / (i_ma * block_s / 3600.0))
     entries, orders = [], []
     for c in range(charges):
-        order = block_order(seeds[c], settings)
-        seq = (order * (n_blocks // len(order) + 2))[:n_blocks]
+        if full_rounds:
+            seq = block_order(seeds[c], settings, n=n_blocks, first_min_hz=first_min_hz)
+        else:
+            order = block_order(seeds[c], settings, first_min_hz=first_min_hz)
+            seq = (order * (n_blocks // len(order) + 2))[:n_blocks]
         orders.append(seq)
         entries.append({"blocks": [[float(h), float(block_s)] for h in seq]})
     entries.append({"mode": "passthrough"})                 # after the map: hold in pass-through
@@ -84,16 +96,20 @@ def main(argv=None):
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=5555)
     ap.add_argument("--label", default="")
+    ap.add_argument("--full-rounds", action="store_true",
+                    help="rounds of the whole setting list for every block (no repeated order); for many short blocks")
+    ap.add_argument("--first-min-hz", type=float, default=None,
+                    help="block 0 must be a switched setting >= this (the step-7 pulse runs at block 0's setting)")
     a = ap.parse_args(argv)
 
     settings = a.settings if a.settings else SETTINGS
     seeds = a.seeds if a.seeds else list(range(1, a.charges + 1))
     if len(seeds) < a.charges:
         raise SystemExit("need one seed per charge")
-    entries, orders, n = build(a.charges, a.block_s, seeds, settings, a.main_mah, a.i_ma)
+    entries, orders, n = build(a.charges, a.block_s, seeds, settings, a.main_mah, a.i_ma, a.full_rounds, a.first_min_hz)
     plan = {"created": datetime.now().isoformat(timespec="seconds"), "label": a.label, "block_s": a.block_s,
             "blocks_per_charge": n, "settings": settings, "seeds": seeds[:a.charges], "orders": orders,
-            "entries": entries, "end": "hold"}
+            "full_rounds": a.full_rounds, "first_min_hz": a.first_min_hz, "entries": entries, "end": "hold"}
     print(f"{a.charges} mapped charge(s), {n} blocks of {a.block_s:g} s each "
           f"({n * a.block_s / 60:.0f} min, main charge ~{a.main_mah / a.i_ma * 60:.0f} min), then pass-through")
     for c, o in enumerate(orders):

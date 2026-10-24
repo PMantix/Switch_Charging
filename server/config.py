@@ -151,7 +151,7 @@ AUTO_FOLLOW_PAUSE_LIMITS = (0.05, 10.0)          # s, and always shorter than th
 # Frequency blocks ("frequency response map", Cycle_Toughness/FreqMap): a sweep entry may carry a list of
 # [hz, seconds] blocks that auto-follow steps through within one charge; hz 0 = pass-through (all FETs on).
 FREQ_BLOCK_S_LIMITS = (5.0, 600.0)               # s per block
-FREQ_BLOCK_MAX = 64                              # blocks per entry
+FREQ_BLOCK_MAX = 128                             # blocks per entry (map 3: 112 x 15 s in a 28 min charge)
 
 # ---------------------------------------------------------------------------
 # Measurement mode (server/measure.py): held state, precision sensing
