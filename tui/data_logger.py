@@ -217,7 +217,7 @@ class DataLogger:
             daemon=True,
         )
         self._writer_thread.start()
-        return RecordTier.MAC, f"Mac: {count} samples -> {self._path.name}"
+        return RecordTier.MAC, f"Mac: {self._duration_s:.0f}s -> {self._path}"
 
     def record(self, data: dict) -> bool:
         """Record one sample (Mac-side only). Returns False if auto-stopped.
@@ -326,7 +326,7 @@ class DataLogger:
                 self._path = local_path
                 self._sample_count = samples
                 pf.delete(name)
-                return f"{samples} samples -> {local_path.name}"
+                return f"{samples} samples -> {local_path}"
         except PiFilesError as exc:
             log.warning("Pi copy failed: %s", exc)
             return f"Copy failed: {exc} (file left on Pi; press O to retry)"
@@ -379,7 +379,7 @@ class DataLogger:
                 log.warning(
                     "DataLogger writer did not drain within %ss", _STOP_JOIN_TIMEOUT,
                 )
-        return f"{count} samples -> {path.name}" if path else "No data"
+        return f"{count} samples -> {path}" if path else "No data"
 
     def _writer_loop(self, path: Path, q: "queue.Queue") -> None:
         try:
