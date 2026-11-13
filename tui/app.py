@@ -355,7 +355,7 @@ class HelpScreen(ModalScreen[None]):
                 "[bold white]RECORDING[/]\n"
                 "  [bold]l[/]         Start / stop recording\n"
                 "  [bold]L[/]         Set run label (filename prefix)\n"
-                "  [bold][ / ][/]     Recording duration -/+\n"
+                "  [bold][ / ][/]     Recording duration -/+ (5 s to 24 h)\n"
                 "  [bold]O[/]         Copy recordings from Pi to this computer\n"
                 "            (~/SwitchingCircuitV2_logs), then delete on Pi\n\n"
                 "[bold white]AUTO-FOLLOW[/]\n"
@@ -1109,7 +1109,13 @@ class SwitchingCircuitApp(App):
                 remaining = max(0, dur - elapsed)
                 lbl = self._data_logger.label
                 lbl = f" {lbl}" if lbl else ""
-                conn_bar.conn_label = f"\u25cf REC [{tier.value}]{lbl} {remaining:.0f}s left"
+                if remaining >= 60:
+                    m, sec = divmod(int(remaining), 60)
+                    h, m = divmod(m, 60)
+                    left = f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+                else:
+                    left = f"{remaining:.0f}s"
+                conn_bar.conn_label = f"\u25cf REC [{tier.value}]{lbl} {left} left"
 
             mascot = self.query_one("#mascot", Mascot)
             mascot.circuit_mode = mode
@@ -1544,7 +1550,8 @@ class SwitchingCircuitApp(App):
         if self._client and self._client.connection_state == ConnectionState.CONNECTED:
             self._client.send_async({"cmd": "set_bus_every", "every": new_every})
 
-    LOG_DURATIONS = [5, 10, 30, 60, 120, 300, 600, 1800, 3600]
+    LOG_DURATIONS = [5, 10, 30, 60, 120, 300, 600, 1800, 3600,
+                     7200, 14400, 28800, 43200, 86400]  # up to 24 h
 
     _stop_in_progress = False
 
@@ -1647,7 +1654,9 @@ class SwitchingCircuitApp(App):
     def _show_duration(self) -> None:
         dur = self._data_logger.duration_s
         tier = self._data_logger.tier_for(dur)
-        if dur >= 60:
+        if dur >= 3600:
+            dur_str = f"{dur/3600:g}h"
+        elif dur >= 60:
             dur_str = f"{dur/60:.0f}min"
         else:
             dur_str = f"{dur:.0f}s"

@@ -261,7 +261,11 @@ class DataLogger:
             )
             self._warned_backpressure = True
 
-        if self._max_samples > 0 and self._sample_count >= self._max_samples:
+        # Stop on wall-clock time, not sample count: Mac-tier rows arrive
+        # at the TUI's broadcast rate (<= 30 Hz), not the sensor rate the
+        # sample budget was computed from, so a count cap made long
+        # recordings run far past the requested duration.
+        if elapsed >= self._duration_s:
             return False
         return True
 
