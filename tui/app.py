@@ -19,7 +19,7 @@ from textual.widgets import Footer, Header, Static, Input, Label
 from textual.worker import Worker
 
 from tui.client import PiClient, ConnectionState
-from tui.data_logger import DataLogger
+from tui.data_logger import DataLogger, sanitize_label
 from tui.discovery import discover_async, save_host, FLEET_HOSTNAMES, AP_GATEWAY
 from tui.eth_scan import KNOWN_ETH_HOSTS
 from tui.latency_probe import LatencyProbe
@@ -354,8 +354,10 @@ class HelpScreen(ModalScreen[None]):
                 "  [bold]R[/]         Plot range auto / fixed (2-4.5V, ±500mA)\n\n"
                 "[bold white]RECORDING[/]\n"
                 "  [bold]l[/]         Start / stop recording\n"
+                "  [bold]L[/]         Set run label (filename prefix)\n"
                 "  [bold][ / ][/]     Recording duration -/+\n"
-                "  [bold]O[/]         Offload recordings from Pi to Mac\n\n"
+                "  [bold]O[/]         Copy recordings from Pi to this computer\n"
+                "            (~/SwitchingCircuitV2_logs), then delete on Pi\n\n"
                 "[bold white]AUTO-FOLLOW[/]\n"
                 "  [bold]F[/]         Toggle auto-follow on/off\n"
                 "  [bold]T[/]         Cycle target (charge / pulse)\n"
@@ -462,6 +464,58 @@ class NetworkModeConfirm(ModalScreen[Optional[str]]):
 
     def action_confirm(self) -> None:
         self.dismiss(self._mode)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class RunLabelDialog(ModalScreen[Optional[str]]):
+    """Prompt for the run label prefixed to recording filenames.
+    Dismisses with the new label ("" clears it) or None on cancel."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    DEFAULT_CSS = """
+    RunLabelDialog { align: center middle; }
+    #rl-box {
+        width: 64;
+        height: auto;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    #rl-title { text-align: center; width: 100%; margin-bottom: 1; }
+    #rl-preview { color: $text-muted; margin-top: 1; }
+    #rl-hint { text-align: center; width: 100%; margin-top: 1; color: $text-muted; }
+    """
+
+    def __init__(self, current: str, example_rest: str):
+        super().__init__()
+        self._current = current
+        self._example_rest = example_rest
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="rl-box"):
+            yield Label("[bold]Run label (filename prefix)[/]", id="rl-title")
+            yield Input(value=self._current, placeholder="e.g. cellA_25C_trial3",
+                        id="rl-input")
+            yield Static("", id="rl-preview")
+            yield Label("[Enter] Save   [Esc] Cancel   (empty = no label)", id="rl-hint")
+
+    def on_mount(self) -> None:
+        self._update_preview(self._current)
+        self.query_one("#rl-input", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self._update_preview(event.value)
+
+    def _update_preview(self, text: str) -> None:
+        label = sanitize_label(text)
+        name = f"{label}_{self._example_rest}" if label else self._example_rest
+        self.query_one("#rl-preview", Static).update(f"File: {name}")
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(sanitize_label(event.value))
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -589,6 +643,7 @@ class SwitchingCircuitApp(App):
         Binding("v", "cycle_viz", "Viz Mode", show=False),
         Binding("y", "cycle_cycle_window", "Cycles", show=False),
         Binding("l", "toggle_log", "Log", show=False),
+        Binding("L", "set_run_label", "Run label", show=False),
         Binding("[", "log_duration_down", "Dur-", show=False),
         Binding("]", "log_duration_up", "Dur+", show=False),
         Binding("a", "load_schedule", "Load schedule", show=False),
@@ -1052,7 +1107,9 @@ class SwitchingCircuitApp(App):
                 elapsed = self._data_logger.elapsed
                 dur = self._data_logger.duration_s
                 remaining = max(0, dur - elapsed)
-                conn_bar.conn_label = f"\u25cf REC [{tier.value}] {remaining:.0f}s left"
+                lbl = self._data_logger.label
+                lbl = f" {lbl}" if lbl else ""
+                conn_bar.conn_label = f"\u25cf REC [{tier.value}]{lbl} {remaining:.0f}s left"
 
             mascot = self.query_one("#mascot", Mascot)
             mascot.circuit_mode = mode
@@ -1547,7 +1604,29 @@ class SwitchingCircuitApp(App):
                 sensor_hz=plot.sensor_rate,
                 client=self._client,
             )
-            self.notify(desc, title=f"Recording [{tier.value}]")
+            label = self._data_logger.label
+            title = f"Recording [{tier.value}]" + (f" {label}" if label else "")
+            self.notify(desc, title=title)
+
+    def action_set_run_label(self) -> None:
+        if self._data_logger.is_logging:
+            self.notify("Stop recording first", severity="warning")
+            return
+        plot = self.query_one("#sensor-plot", SensorPlot)
+        freq_str = f"{self._current_freq:.1f}Hz".replace(".", "p")
+        example = (f"{self._circuit_mode}_seq{self._current_seq + 1}_{freq_str}_"
+                   f"{plot.sensor_rate:.0f}sps_<time>.csv")
+
+        def _done(result: Optional[str]) -> None:
+            if result is None:
+                return
+            self._data_logger.label = result
+            if result:
+                self.notify(f"Recordings will start with: {result}_", title="Run label")
+            else:
+                self.notify("Run label cleared", title="Run label")
+
+        self.push_screen(RunLabelDialog(self._data_logger.label, example), _done)
 
     def action_log_duration_up(self) -> None:
         current = self._data_logger.duration_s
@@ -1831,63 +1910,68 @@ class SwitchingCircuitApp(App):
         self.run_worker(self._offload_worker(), exclusive=True, group="offload")
 
     async def _offload_worker(self) -> None:
+        """Copy every pi_*.csv to ~/SwitchingCircuitV2_logs over the command
+        socket (no ssh/scp needed, works on Windows), deleting each from the
+        Pi only after its copy is complete. Never raises: an unhandled
+        worker exception would take down the whole TUI."""
         import asyncio
-        import subprocess
         from pathlib import Path
+        from tui.pi_files import PiFiles, PiFilesError
 
-        loop = asyncio.get_event_loop()
         host = self._client.host if self._client else ""
+        port = self._client.port if self._client else 5555
         if not host:
             return
-
         local_dir = Path.home() / "SwitchingCircuitV2_logs"
-        local_dir.mkdir(parents=True, exist_ok=True)
-        pi_dir = "/home/pi/SwitchingCircuitV2_logs"
-        ssh_opts = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-                    "-o", "ConnectTimeout=5"]
 
-        # List remote files
-        result = await loop.run_in_executor(None, lambda: subprocess.run(
-            ["ssh", *ssh_opts, f"pi@{host}", f"ls {pi_dir}/pi_*.csv 2>/dev/null"],
-            capture_output=True, text=True, timeout=10,
-        ))
-        if result.returncode != 0 or not result.stdout.strip():
-            self.notify("No recordings found on Pi", title="Offload")
+        def _run() -> tuple[int, int, int, list[str]]:
+            copied = deleted = skipped = 0
+            errors: list[str] = []
+            with PiFiles(host, port) as pf:
+                files = pf.list()
+                for f in files:
+                    name = f.get("name", "")
+                    if f.get("recording"):
+                        skipped += 1  # still being written on the Pi
+                        continue
+                    try:
+                        pf.fetch(name, local_dir)
+                        copied += 1
+                    except PiFilesError as exc:
+                        errors.append(f"{name}: {exc}")
+                        continue
+                    try:
+                        pf.delete(name)
+                        deleted += 1
+                    except PiFilesError as exc:
+                        errors.append(f"delete {name}: {exc}")
+            return copied, deleted, skipped, errors
+
+        loop = asyncio.get_running_loop()
+        try:
+            copied, deleted, skipped, errors = await loop.run_in_executor(None, _run)
+        except PiFilesError as exc:
+            self.notify(str(exc), title="Offload failed", severity="error", timeout=10)
             return
-        remote_files = [f.strip() for f in result.stdout.strip().splitlines()]
-
-        # SCP all files
-        copied = 0
-        for remote_path in remote_files:
-            fname = remote_path.split("/")[-1]
-            local_path = local_dir / fname
-            scp_result = await loop.run_in_executor(None, lambda rp=remote_path, lp=local_path: subprocess.run(
-                ["scp", *ssh_opts, f"pi@{host}:{rp}", str(lp)],
-                capture_output=True, timeout=30,
-            ))
-            if scp_result.returncode == 0:
-                copied += 1
-
-        if copied == 0:
-            self.notify("Failed to copy any files", title="Offload", severity="error")
+        except Exception as exc:
+            log.exception("offload failed")
+            self.notify(f"{type(exc).__name__}: {exc}", title="Offload failed",
+                        severity="error", timeout=10)
             return
 
-        # Verify and delete
-        deleted = 0
-        for remote_path in remote_files:
-            fname = remote_path.split("/")[-1]
-            local_path = local_dir / fname
-            if local_path.exists() and local_path.stat().st_size > 0:
-                await loop.run_in_executor(None, lambda rp=remote_path: subprocess.run(
-                    ["ssh", *ssh_opts, f"pi@{host}", f"rm {rp}"],
-                    capture_output=True, timeout=10,
-                ))
-                deleted += 1
-
-        self.notify(
-            f"Copied {copied} file(s) to ~/SwitchingCircuitV2_logs/\nDeleted {deleted} from Pi",
-            title="Offload complete",
-        )
+        if copied == 0 and not errors:
+            msg = "No recordings found on Pi"
+            if skipped:
+                msg = "Only an in-progress recording is on the Pi; stop it first"
+            self.notify(msg, title="Offload")
+            return
+        msg = f"Copied {copied} file(s) to {local_dir}\nDeleted {deleted} from Pi"
+        if skipped:
+            msg += f"\nSkipped {skipped} still recording"
+        if errors:
+            msg += "\n" + "\n".join(errors[:3])
+        self.notify(msg, title="Offload complete" if not errors else "Offload: some errors",
+                    severity="information" if not errors else "warning", timeout=10)
 
     # -- Schedule monitor ---------------------------------------------------
 

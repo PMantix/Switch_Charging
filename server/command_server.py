@@ -6,8 +6,10 @@ Supports multiple concurrent clients and a streaming subscription mode
 that pushes state updates at ~15 Hz.
 """
 
+import base64
 import json
 import logging
+import re
 import socket
 import threading
 import time
@@ -22,6 +24,12 @@ from server.recorder import PiRecorder
 from server.schedule import load_schedule, load_schedule_inline, validate_schedule_semantics
 
 log = logging.getLogger(__name__)
+
+# Recording file transfer (list/read/delete over this socket, so clients
+# need no ssh/scp — Windows laptops in particular). Names are restricted
+# to plain pi_*.csv basenames inside the recorder's log dir.
+_RECORDING_NAME_RE = re.compile(r"^pi_[A-Za-z0-9._-]+\.csv$")
+_READ_CHUNK_MAX = 256 * 1024
 
 # Broadcast rate bounds (Hz). Counter-intuitive tuning note: lower is
 # NOT gentler over WiFi. Sparse traffic (5 Hz → 200 ms gaps) lets the
@@ -342,8 +350,51 @@ class CommandServer:
                     max_samples, mode=rec_mode, freq=rec_freq,
                     seq=rec_seq, sensor_hz=rec_sensor_hz,
                     align_to_step=align_to_step,
+                    label=msg.get("rec_label", ""),
                 )
                 return {"ok": True, "path": path}
+
+            elif cmd == "list_recordings":
+                active = self._active_recording_name()
+                files = []
+                log_dir = self._recorder.log_dir
+                if log_dir.is_dir():
+                    for p in log_dir.glob("pi_*.csv"):
+                        try:
+                            st = p.stat()
+                        except OSError:
+                            continue
+                        files.append({
+                            "name": p.name, "size": st.st_size, "mtime": st.st_mtime,
+                            "recording": p.name == active,
+                        })
+                files.sort(key=lambda f: f["mtime"], reverse=True)
+                return {"ok": True, "files": files}
+
+            elif cmd == "read_recording":
+                path, err = self._recording_path(msg.get("name"))
+                if err:
+                    return {"ok": False, "error": err}
+                offset = max(0, int(msg.get("offset", 0)))
+                length = min(max(1, int(msg.get("length", _READ_CHUNK_MAX))), _READ_CHUNK_MAX)
+                size = path.stat().st_size
+                with open(path, "rb") as f:
+                    f.seek(offset)
+                    chunk = f.read(length)
+                return {
+                    "ok": True, "size": size, "offset": offset,
+                    "data": base64.b64encode(chunk).decode("ascii"),
+                    "eof": offset + len(chunk) >= size,
+                }
+
+            elif cmd == "delete_recording":
+                path, err = self._recording_path(msg.get("name"))
+                if err:
+                    return {"ok": False, "error": err}
+                if path.name == self._active_recording_name():
+                    return {"ok": False, "error": "Recording in progress"}
+                path.unlink()
+                return {"ok": True, "name": path.name}
 
             elif cmd == "set_calibration":
                 ch = msg.get("channel")
@@ -652,6 +703,21 @@ class CommandServer:
                             pass
 
     # -- helpers ------------------------------------------------------------
+
+    def _active_recording_name(self):
+        if self._recorder.is_recording and self._recorder.file_path:
+            return Path(self._recorder.file_path).name
+        return None
+
+    def _recording_path(self, name):
+        """Resolve a client-supplied recording name to a file in the log dir.
+        Returns (path, None) or (None, error)."""
+        if not isinstance(name, str) or not _RECORDING_NAME_RE.match(name):
+            return None, "Invalid recording name"
+        path = self._recorder.log_dir / name
+        if not path.is_file():
+            return None, f"No such recording: {name}"
+        return path, None
 
     @staticmethod
     def _send_line(sock, obj):

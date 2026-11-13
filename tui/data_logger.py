@@ -2,7 +2,8 @@
 Switching Circuit V2 - Data Logger.
 
 Two recording tiers:
-  - Pi (≤ 10min): Records on Pi SD card at full stream rate, SCPs to Mac when done
+  - Pi (≤ 10min): Records on Pi SD card at full stream rate, copied to this
+    computer over the command socket when done (tui/pi_files.py)
   - Mac (> 10min): Records directly on Mac from TUI state stream
 
 In simulation (``python -m tui --sim``) everything records on the Mac
@@ -18,6 +19,7 @@ few MB. We log one warning if queue depth ever exceeds the threshold.
 import csv
 import logging
 import queue
+import re
 import subprocess
 import threading
 from datetime import datetime
@@ -35,6 +37,18 @@ _DEPTH_WARN_THRESHOLD = 1000
 _STOP_SENTINEL = object()
 _STOP_JOIN_TIMEOUT = 5.0
 _DURATION_CACHE = Path.home() / ".switching-circuit-duration"
+_LABEL_CACHE = Path.home() / ".switching-circuit-label"
+_LABEL_MAX = 40
+
+
+def sanitize_label(label) -> str:
+    """Make a user-typed run label safe for a filename on Windows, macOS
+    and Linux. Must match server/recorder.py's sanitize_label."""
+    if not label:
+        return ""
+    s = re.sub(r"\s+", "_", str(label).strip())
+    s = re.sub(r"[^A-Za-z0-9._-]", "", s).strip("._-")
+    return s[:_LABEL_MAX]
 
 
 class RecordTier(Enum):
@@ -54,6 +68,7 @@ class DataLogger:
         self._simulated = simulated
         self._tier: Optional[RecordTier] = None
         self._duration_s: float = self._load_duration()
+        self._label: str = self._load_label()
 
         # Mac-side state
         self._path: Optional[Path] = None
@@ -92,6 +107,26 @@ class DataLogger:
     def duration_s(self, val: float):
         self._duration_s = max(1.0, val)
         self._save_duration(self._duration_s)
+
+    @property
+    def label(self) -> str:
+        """Run label prefixed to recording filenames ("" for none)."""
+        return self._label
+
+    @label.setter
+    def label(self, val: str):
+        self._label = sanitize_label(val)
+        try:
+            _LABEL_CACHE.write_text(self._label)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _load_label() -> str:
+        try:
+            return sanitize_label(_LABEL_CACHE.read_text())
+        except Exception:
+            return ""
 
     @staticmethod
     def _load_duration() -> float:
@@ -141,13 +176,8 @@ class DataLogger:
 
     def _start_pi(self, count, mode, freq, seq, sensor_hz):
         if self._client:
-            # Build expected filename (matches server/recorder.py naming)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            freq_str = f"{freq:.1f}Hz".replace(".", "p")
-            sensor_str = f"{sensor_hz:.0f}sps"
-            expected_name = f"pi_{mode}_seq{seq+1}_{freq_str}_{sensor_str}_{ts}.csv"
-            expected_path = f"/home/pi/SwitchingCircuitV2_logs/{expected_name}"
-
+            # The main client is subscribed, so its reply doesn't carry
+            # the path; _stop_pi gets the real path from pi_record_stop.
             self._client.send_command({
                 "cmd": "pi_record_start",
                 "max_samples": count,
@@ -155,9 +185,10 @@ class DataLogger:
                 "rec_freq": freq,
                 "rec_seq": seq,
                 "rec_sensor_hz": sensor_hz,
+                "rec_label": self._label,  # ignored by pre-label servers
             })
             self._pi_recording = True
-            self._pi_path = expected_path
+            self._pi_path = None
             self._max_samples = count
             dur = self._duration_s
             return RecordTier.PI, f"Pi: {count} samples ({dur:.0f}s)"
@@ -172,6 +203,8 @@ class DataLogger:
         freq_str = f"{freq:.1f}Hz".replace(".", "p")
         sensor_str = f"{sensor_hz:.0f}sps"
         prefix = SIM_PREFIX if self._simulated else ""
+        if self._label:
+            prefix += f"{self._label}_"
         self._path = self._log_dir / f"{prefix}{mode}_seq{seq+1}_{freq_str}_{sensor_str}_{ts}.csv"
         self._max_samples = count
         self._warned_backpressure = False
@@ -262,60 +295,63 @@ class DataLogger:
         # rather than `raspberrypi.local`, which may not resolve over a
         # local AP network.
         pi_host = "raspberrypi.local"
+        pi_port = 5555
         if self._client is not None:
-            host_attr = getattr(self._client, "host", "")
-            if host_attr:
-                pi_host = host_attr
+            pi_host = getattr(self._client, "host", "") or pi_host
+            pi_port = getattr(self._client, "port", 0) or pi_port
 
-        # Tell the Pi to stop recording.
-        if self._client:
-            try:
-                self._client.send_command({"cmd": "pi_record_stop"})
-            except Exception:
-                pass
+        from tui.pi_files import PiFiles, PiFilesError, ServerTooOld
 
-        # Brief pause to let Pi flush the CSV writer queue.
-        import time
-        time.sleep(0.5)
+        # Stop and copy over a side connection: its pi_record_stop reply
+        # carries the real file path (the subscribed main client's doesn't).
+        # pi_record_stop drains the Pi's writer before replying, so the
+        # file is complete by the time we read it.
+        try:
+            with PiFiles(pi_host, pi_port) as pf:
+                resp = pf.call({"cmd": "pi_record_stop"})
+                remote = resp.get("path") or ""
+                name = Path(remote.replace("\\", "/")).name if remote else ""
+                if not name:
+                    return "No data on Pi"
+                try:
+                    local_path = pf.fetch(name, self._log_dir)
+                except ServerTooOld:
+                    return self._copy_via_ssh(pi_host, remote)
+                with open(local_path, newline="") as f:
+                    samples = max(0, sum(1 for _ in f) - 1)
+                self._path = local_path
+                self._sample_count = samples
+                pf.delete(name)
+                return f"{samples} samples -> {local_path.name}"
+        except PiFilesError as exc:
+            log.warning("Pi copy failed: %s", exc)
+            return f"Copy failed: {exc} (file left on Pi; press O to retry)"
 
+    def _copy_via_ssh(self, pi_host: str, remote_path: str) -> str:
+        """Legacy copy for Pi servers without read_recording. Needs ssh/scp
+        and key auth for pi@host; fails fast (BatchMode) otherwise."""
         ssh_target = f"pi@{pi_host}"
         ssh_opts = [
             "-o", "StrictHostKeyChecking=no",
             "-o", "ConnectTimeout=3",
             "-o", "BatchMode=yes",  # fail fast if auth would prompt
         ]
-
-        # Find the most recent pi_*.csv on the Pi.
-        try:
-            result = subprocess.run(
-                ["ssh", *ssh_opts, ssh_target,
-                 "ls -t ~/SwitchingCircuitV2_logs/pi_*.csv 2>/dev/null | head -1"],
-                capture_output=True, text=True, timeout=8,
-            )
-            remote_path = result.stdout.strip()
-        except Exception:
-            remote_path = self._pi_path
-
-        if not remote_path:
-            return "No data on Pi"
-
-        # SCP from Pi to Mac.
         self._log_dir.mkdir(parents=True, exist_ok=True)
         local_name = Path(remote_path).name
         local_path = self._log_dir / local_name
         try:
             result = subprocess.run(
                 ["scp", *ssh_opts, f"{ssh_target}:{remote_path}", str(local_path)],
-                capture_output=True, timeout=20,
+                capture_output=True, timeout=60,
             )
             if result.returncode == 0:
-                with open(local_path) as f:
-                    samples = sum(1 for _ in f) - 1
+                with open(local_path, newline="") as f:
+                    samples = max(0, sum(1 for _ in f) - 1)
                 self._path = local_path
                 self._sample_count = samples
                 subprocess.run(
                     ["ssh", *ssh_opts, ssh_target, f"rm {remote_path}"],
-                    capture_output=True, timeout=5,
+                    capture_output=True, timeout=10,
                 )
                 return f"{samples} samples -> {local_name}"
             err = result.stderr.decode(errors="replace").strip()
@@ -324,7 +360,7 @@ class DataLogger:
             return "SCP timed out — check Pi reachability"
         except Exception as e:
             log.warning("SCP failed: %s", e)
-            return f"Transfer failed: {e}"
+            return f"Transfer failed: {e} (redeploy server/ to copy without ssh)"
 
     def _stop_mac(self) -> str:
         path = self._path

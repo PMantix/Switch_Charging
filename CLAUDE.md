@@ -23,6 +23,15 @@ user and offer to deploy:
 Until deployed, everything in coin-cell mode works except the `z` key,
 which silently does nothing against the old server.
 
+The 2026-11-13 commit (recording transfer + run label) also changed
+`server/` and is likewise undeployed. It adds `list_recordings`,
+`read_recording`, `delete_recording` and a `rec_label` field on
+`pi_record_start`. Verify after deploy: `{"cmd": "list_recordings"}`
+returns `"ok": true` with a `files` list. Until deployed, `O` reports
+"Pi server is too old" (no ssh-free copy) and the run label (`L`) is
+ignored for Pi-tier (≤10 min) recordings. pi_0 was mid-experiment on
+2026-11-13 — don't deploy it without the user's go-ahead.
+
 Once every Pi is deployed, delete this section and commit.
 
 ## Delegation triggers — this repo

@@ -16,6 +16,7 @@ from __future__ import annotations
 import csv
 import logging
 import queue
+import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,20 @@ DEFAULT_LOG_DIR = Path.home() / "SwitchingCircuitV2_logs"
 _DEPTH_WARN_THRESHOLD = 1000  # queue depth at which we log a backpressure warning
 _STOP_SENTINEL = object()
 _STOP_JOIN_TIMEOUT = 5.0  # seconds to wait for writer to drain before warning
+_LABEL_MAX = 40
+
+
+def sanitize_label(label) -> str:
+    """Make a user-typed run label safe for a filename on Linux and Windows.
+
+    Spaces become underscores; anything outside [A-Za-z0-9._-] is dropped.
+    Must match tui/data_logger.py's sanitize_label so both tiers agree.
+    """
+    if not label:
+        return ""
+    s = re.sub(r"\s+", "_", str(label).strip())
+    s = re.sub(r"[^A-Za-z0-9._-]", "", s).strip("._-")
+    return s[:_LABEL_MAX]
 
 
 class PiRecorder:
@@ -78,9 +93,13 @@ class PiRecorder:
     def file_path(self):
         return self._path
 
+    @property
+    def log_dir(self) -> Path:
+        return self._log_dir
+
     def start(self, max_samples: int, mode: str = "unknown",
               freq: float = 1.0, seq: int = 0, sensor_hz: float = 15.0,
-              align_to_step: int | None = None):
+              align_to_step: int | None = None, label: str = ""):
         """Start recording. Returns the file path.
 
         `align_to_step` (default 1) makes the recorder wait for a transition
@@ -98,7 +117,11 @@ class PiRecorder:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             freq_str = f"{freq:.1f}Hz".replace(".", "p")
             sensor_str = f"{sensor_hz:.0f}sps"
-            self._path = self._log_dir / f"pi_{mode}_seq{seq+1}_{freq_str}_{sensor_str}_{ts}.csv"
+            label = sanitize_label(label)
+            label_str = f"{label}_" if label else ""
+            self._path = self._log_dir / (
+                f"pi_{label_str}{mode}_seq{seq+1}_{freq_str}_{sensor_str}_{ts}.csv"
+            )
 
             self._sample_count = 0
             self._max_samples = max_samples

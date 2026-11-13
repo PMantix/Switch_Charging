@@ -50,8 +50,9 @@ class LeftPanel(Widget):
             ]),
             ("RECORD", [
                 ("  l  ", "Start/stop"),
+                ("  L  ", "Run label"),
                 (" [ ] ", "Duration -/+"),
-                ("  O  ", "Offload to Mac"),
+                ("  O  ", "Copy from Pi"),
             ]),
             ("AUTO-FOLLOW", [
                 ("  F  ", "Toggle"),
